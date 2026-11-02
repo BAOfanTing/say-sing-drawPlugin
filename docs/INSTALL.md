@@ -106,7 +106,7 @@ gateway/              跑在你电脑上的换声网关（零依赖 Node）
 sing-model/
   run.py              换声编排：裁剪 → 分离 → 换声 → 混伴奏（网关调的就是它）
   fetch-*.ps1         拉模型的脚本（分块/续传，国内镜像会断流）
-  rvc/                新版 RVC 源码 + 权重（.gitignore 排除，不进仓库）
+  rvc/                新版 RVC 源码（入库）；rvc/assets/ 下的权重不入库，只保留空目录（.gitkeep）
 docs/PROTOCOL.md      插件 ↔ 网关 HTTP 契约（想用别的语言重写后端看这个）
 docs/TUNNEL.md        把本机网关暴露成 https 的三种做法
 docs/TROUBLESHOOTING.md  排错（含容器化 OneBot 发文件失败那个坑）

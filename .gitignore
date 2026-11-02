@@ -21,8 +21,11 @@ Thumbs.db
 node_modules/
 
 # ── 本地模型与运行时（体积大，绝不入库）────────────────────────────
-# 跟踪的只有 sing-model/run.py 和三个拉取脚本；下面这些是"机器上跑出来的东西"
-sing-model/rvc/
+# RVC 源码入库；只排除 assets 下的权重文件，各权重目录用 .gitkeep 保留空壳
+sing-model/rvc/assets/**
+!sing-model/rvc/assets/**/
+!sing-model/rvc/assets/**/.gitkeep
+# 下面这些是"机器上跑出来的东西"
 sing-model/downloads/
 sing-model/tmp/
 sing-model/out/
@@ -36,8 +39,10 @@ sing-model/__pycache__/
 *.onnx
 *.safetensors
 *.whl
-# ── 说话模型（Breeze TTS 2）：代码入库，权重/下载/产物不入库 ──────────
-say-model/weights/
+# ── 说话模型（Breeze TTS 2）：代码入库，权重只留空壳/下载/产物不入库 ──────────
+say-model/weights/**
+!say-model/weights/**/
+!say-model/weights/**/.gitkeep
 say-model/downloads/
 say-model/outputs/
 __pycache__/
