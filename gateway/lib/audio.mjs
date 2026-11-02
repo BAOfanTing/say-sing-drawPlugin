@@ -1,6 +1,7 @@
 // ffmpeg / ffprobe 包装：没有 ffmpeg 就如实降级（不假装成功）。
 // 全部走 spawn + 参数数组，不经 shell —— 文件名里有空格或引号也不会被解释成命令。
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -154,6 +155,32 @@ export async function shiftPitch(input, output, ratio, { ext = 'mp3', bitrate = 
   const args = ['-y', '-i', input, '-af',
     `rubberband=pitch=${Number(ratio).toFixed(4)}:formant=preserved:pitchq=quality`];
   if (ext === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrate);
+  args.push(output);
+  try {
+    await runProcess(bin, args, { timeoutMs: 120000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 套一条 ffmpeg 滤镜链（情绪加工用：提速/压缩/EQ/限幅）。
+ *
+ * 为什么不合成时就解决：`instructions` 改的是"发声方式"，而响度、硬度和节奏
+ * 这些"后期味道"用 ffmpeg 做更可控、且**完全不碰音色**（实测音色相似度 0.986，
+ * 合成时传 speed 反而是 0.944）。滤镜串由 emotions.mjs 的预设给，这里只负责跑。
+ *
+ * ffmpeg 不可用或滤镜非法时返回 false —— 上层照常发未加工的音频，别把语音整单搞死。
+ */
+export async function applyFilter(input, output, filter, { ext = 'mp3', bitrate = '128k' } = {}) {
+  const chain = String(filter ?? '').trim();
+  if (!chain) return false;
+  const bin = await detectFfmpeg();
+  if (!bin) return false;
+  const args = ['-y', '-i', input, '-af', chain];
+  if (ext === 'mp3') args.push('-c:a', 'libmp3lame', '-b:a', bitrate);
+  else args.push('-c:a', 'pcm_s16le');
   args.push(output);
   try {
     await runProcess(bin, args, { timeoutMs: 120000 });

@@ -58,3 +58,6 @@ say-model/logs/
 venv/
 # 体检/试听临时产物
 say-model/*.crdownload
+
+# 语气 A/B 测试临时产物（音频、脚本、补丁）
+test/tmp-tone-ab/

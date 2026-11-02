@@ -162,7 +162,7 @@
     {
       "name": "say_status",
       "timeoutMs": 20000,
-      "description": "查「说话」后端状态：在不在线、当前音色、剩余额度。用户问「你能说话吗」「语音怎么不能用」「额度还剩多少」时调用。",
+      "description": "查「说话」后端状态：在不在线、当前音色、剩余额度，以及可用的情绪标记（emotions / emotionTag）。用户问「你能说话吗」「语音怎么不能用」「额度还剩多少」「能不能换个语气」时调用。",
       "parameters": {
         "type": "object",
         "properties": {}

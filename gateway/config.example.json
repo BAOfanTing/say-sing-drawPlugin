@@ -33,6 +33,8 @@
     "languageCode": "zh",
     "instructions": "",
     "guidanceScale": 4.0,
+    "emotionTag": true,
+    "emotions": {},
     "outputFormat": "mp3_24000_128",
     "localUrl": "http://127.0.0.1:7860",
     "refAudio": "",

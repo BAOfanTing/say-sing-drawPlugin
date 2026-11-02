@@ -7,7 +7,8 @@ import { spawn } from 'node:child_process';
 import { createJobQueue } from './jobs.mjs';
 import { createSource } from './sources.mjs';
 import { createVoiceEngine } from './voice.mjs';
-import { transcodeTo, probeSeconds, shiftPitch, concatAudio, runProcess } from './audio.mjs';
+import { transcodeTo, probeSeconds, shiftPitch, concatAudio, runProcess, applyFilter } from './audio.mjs';
+import { parseEmotionTag, resolveEmotionKey, emotionInstruction, emotionList } from './emotions.mjs';
 import { createSayEngine } from './say.mjs';
 
 export const VERSION = '1.0.5';
@@ -581,11 +582,11 @@ export function createApp({
    * 所以合成后测一次基频，落在 [registerMin, registerMax] 之外就换个 seed 重来，
    * 不碰音频本身，也就没有变调痕迹。
    */
-  const synthesizeInRegister = async (text, output, baseSeed = 42) => {
+  const synthesizeInRegister = async (text, output, baseSeed = 42, voiceOptions = {}) => {
     const min = Number(config.say.registerMin) || 0;
     const max = Number(config.say.registerMax) || 0;
     const retries = Number(config.say.registerRetries) || 0;
-    let spoke = await say.convert({ text, output, seed: baseSeed });
+    let spoke = await say.convert({ text, output, seed: baseSeed, ...voiceOptions });
     // 云端音色本来就稳定，不需要守门（守门每轮要跑一次 python 测基频，会把 3 秒拖成 20 秒）
     if (spoke.via === 'cloud') return spoke;
     if (min <= 0 || max <= 0 || retries <= 0) return spoke;
@@ -602,7 +603,7 @@ export function createApp({
       const nextSeed = baseSeed + attempt * 13;
       console.log(`[say] 音区 ${pitch.toFixed(0)} Hz 不在 ${min}-${max}，换 seed=${nextSeed} 重试（${attempt}/${retries}）`);
       try { fs.rmSync(spoke.file, { force: true }); } catch { /* 忽略 */ }
-      spoke = await say.convert({ text, output, seed: nextSeed });
+      spoke = await say.convert({ text, output, seed: nextSeed, ...voiceOptions });
       pitch = await measurePitch(spoke.file);
     }
     if (pitch > 0) console.log(`[say] 音区 ${pitch.toFixed(0)} Hz`);
@@ -669,20 +670,35 @@ export function createApp({
   /**
    * 把一段话读成语音条（不走 GPU 队列：云端 TTS 几秒就完，没必要排队）。
    * Breeze 直接返回 mp3，不再做任何转码 —— 少一道工序就少一个失败点。
+   *
+   * 情绪（options.emotion / 文字开头的【生气】标记）在这一层解析：
+   * 剥掉标记 → 该条换「表演指令」+ 开 use_speaker_boost → 合成后套 ffmpeg 加工。
+   * 没有情绪时走的是原路径，一个字节都不变（向后兼容）。
    */
-  async function handleSay(req, res, text) {
+  async function handleSay(req, res, text, options = {}) {
     const startedAt = Date.now();
+    const emotionTable = config.say.emotions || {};
+    // 文字里的标记优先于 body.emotion：模型写的比调用方猜的更贴身
+    const tagged = config.say.emotionTag !== false ? parseEmotionTag(text, emotionTable) : { emotion: '', text };
+    const askedEmotion = tagged.emotion || resolveEmotionKey(options.emotion, emotionTable);
+    const preset = askedEmotion ? emotionTable[askedEmotion] : null;
+    const speakText = String(tagged.text ?? '');
+    const voiceOptions = preset
+      ? { instructions: emotionInstruction(config.say.instructions, preset), boost: preset.boost !== false }
+      : {};
+    if (preset) console.log(`[say] 情绪=${askedEmotion}（${preset.label || ''}）`);
+
     // 截断要留痕：以前静默截断，长回复后半段被丢掉、模型完全不知道
     const sayMaxChars = Math.max(20, Number(config.say.maxChars) || 800);
-    const wasTruncated = String(text ?? '').replace(/\s+/g, ' ').trim().length > sayMaxChars;
+    const wasTruncated = String(speakText ?? '').replace(/\s+/g, ' ').trim().length > sayMaxChars;
     clearLocalIdle();                                 // 有请求进来就别再倒计时
     // breeze-local：说话前必须把本地模型准备好；auto：先让云端试，失败再准备本地
     if (config.say.engine === 'breeze-local') await resumeLocalSay();
 
     // 长回复切句：逐句合成 + 逐句音高归一，再拼回一条
     const chunks = config.say.splitSentences
-      ? splitSayText(text, Number(config.say.maxSegmentChars) || 30)
-      : [String(text ?? '')];
+      ? splitSayText(speakText, Number(config.say.maxSegmentChars) || 30)
+      : [String(speakText ?? '')];
     const tempFiles = [];
     let spoke;
     try {
@@ -691,7 +707,7 @@ export function createApp({
         const parts = [];
         for (let i = 0; i < chunks.length; i += 1) {
           const partRaw = path.join(tmpDir, `say-${Date.now()}-${i}.wav`);
-          const part = await synthesizeInRegister(chunks[i], partRaw);
+          const part = await synthesizeInRegister(chunks[i], partRaw, 42, voiceOptions);
           tempFiles.push(part.file);
           let normalizedPart = part.file;
           if (part.via !== 'cloud') {
@@ -704,17 +720,17 @@ export function createApp({
         const ok = await concatAudio(parts, merged, { ext: 'wav' });
         if (!ok) throw Object.assign(new Error('分段合成后拼接失败'), { code: 'E_SAY_CONCAT' });
         tempFiles.push(merged);
-        spoke = { file: merged, bytes: fs.statSync(merged).size, chars: String(text ?? '').length, format: 'wav' };
+        spoke = { file: merged, bytes: fs.statSync(merged).size, chars: speakText.length, format: 'wav' };
       } else {
         const raw = path.join(tmpDir, `say-${Date.now()}.wav`);
         try {
-          spoke = await synthesizeInRegister(text, raw);
+          spoke = await synthesizeInRegister(speakText, raw, 42, voiceOptions);
         } catch (error) {
           // auto：云端挂了才去拉本地模型重试一次（本地准备会收换声常驻，所以放到这里）
           if (config.say.engine !== 'auto') throw error;
           const prepared = await resumeLocalSay();
           if (!prepared) throw error;
-          spoke = await synthesizeInRegister(text, raw);
+          spoke = await synthesizeInRegister(speakText, raw, 42, voiceOptions);
         }
         tempFiles.push(spoke.file);
         // 云端输出保持原样（那是官方音色，改音高反而会走味）
@@ -729,6 +745,21 @@ export function createApp({
       for (const f of tempFiles) { try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ } }
       // 401/额度类错误原样带出去：使用者最需要知道的是"Key 不对"还是"没钱了"
       throw Object.assign(new Error(`读这段话失败：${String(error?.message ?? error).slice(0, 240)}`), { code });
+    }
+
+    // 情绪后期加工：合成时已经带了表演指令，这里再补响度/节奏/硬度。
+    // ffmpeg 只动响度和时间尺度、不动音高，所以音色不受影响；
+    // 失败（没 ffmpeg / 滤镜写错）就发未加工的版本，别为了一点音色把语音整单搞死。
+    if (preset?.filter) {
+      const ext = /mp3$/i.test(spoke.file) ? 'mp3' : 'wav';
+      const filtered = path.join(tmpDir, `say-${Date.now()}-emo.${ext}`);
+      const filteredOk = await applyFilter(spoke.file, filtered, preset.filter, { ext });
+      if (filteredOk && fs.existsSync(filtered)) {
+        tempFiles.push(filtered);
+        spoke = { ...spoke, file: filtered, bytes: fs.statSync(filtered).size, format: ext };
+      } else {
+        console.warn('[say] 情绪加工没跑成（ffmpeg 不可用或滤镜不合法），发未加工的音频');
+      }
     }
 
     const buffer = fs.readFileSync(spoke.file);
@@ -893,7 +924,8 @@ export function createApp({
               + '想让机器人说话请把 say.engine 设成 breeze（并在插件里填 API Key）；想让它唱，就用「唱：歌名」的格式调用。'
             ), { code: 'E_NOT_TTS' });
           }
-          await handleSay(req, res, input);
+          // emotion / tone 是可选的情绪通道：宿主或调用方想指定语气时传
+          await handleSay(req, res, input, { emotion: body.emotion ?? body.tone ?? '' });
           return;
         }
         // 语音条能有多长，取决于协议端与服务端策略，不是固定 60 秒：
@@ -1004,7 +1036,10 @@ export function createApp({
           online,
           note,
           localRunning,
-          idleMs: Number(config.say.localIdleMs) || 0
+          idleMs: Number(config.say.localIdleMs) || 0,
+          // 情绪通道：插件页/排错时能直接看出"哪些标记可用"
+          emotionTag: config.say.emotionTag !== false,
+          emotions: emotionList(config.say.emotions).map((e) => e.id)
         });
         return;
       }

@@ -86,8 +86,11 @@ function makeCloudEngine(say) {
     },
     credentials: () => ({ ...runtime }),
 
-    /** 把文字读成音频，写进 output（扩展名按 content-type 决定）。seed 可逐次覆盖。 */
-    async convert({ text, output }) {
+    /**
+     * 把文字读成音频，写进 output（扩展名按 content-type 决定）。
+     * seed 可逐次覆盖；instructions / boost 可由调用方逐条覆盖（情绪预设用）。
+     */
+    async convert({ text, output, instructions: overrideInstructions, boost } = {}) {
       if (!enabled) throw Object.assign(new Error('说话功能没开（网关 config.say.engine 不是 breeze）'), { code: 'E_SAY_OFF' });
       if (!runtime.apiKey) throw Object.assign(new Error('还没配 Breeze API Key'), { code: 'E_SAY_NO_KEY' });
       if (!runtime.voiceId) throw Object.assign(new Error('还没选 Breeze 音色'), { code: 'E_SAY_NO_VOICE' });
@@ -95,12 +98,20 @@ function makeCloudEngine(say) {
       const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, maxChars);
       if (!clean) throw Object.assign(new Error('要读的文字是空的'), { code: 'E_SAY_EMPTY' });
 
+      // 逐条覆盖优先；不传就用配置里那句固定的
+      const effectiveInstructions = overrideInstructions === undefined
+        ? instructions
+        : String(overrideInstructions ?? '').trim();
+
       const url = `${baseUrl}/v1/text-to-speech/${encodeURIComponent(runtime.voiceId)}`
         + `?output_format=${encodeURIComponent(outputFormat)}&delivery=sync`;
       const payload = { text: clean, model_id: modelId };
       if (languageCode) payload.language_code = languageCode;
-      if (instructions) payload.instructions = instructions;
-      if (guidanceScale > 0) payload.voice_settings = { guidance_scale: guidanceScale };
+      if (effectiveInstructions) payload.instructions = effectiveInstructions;
+      // boost 与 guidance 互斥：官方写明 guidance_scale > 1 时 use_speaker_boost 会被忽略。
+      // 有情绪时我们要的是"贴住 voice_id"，所以走 boost、不再传 guidance。
+      if (boost === true) payload.voice_settings = { use_speaker_boost: true };
+      else if (guidanceScale > 0) payload.voice_settings = { guidance_scale: guidanceScale };
 
       const allKeys = [runtime.apiKey, ...spareKeys].filter(Boolean);
       // 轮换顺序：先用当前 key，失败再按列表换下一个（最多把列表走两遍）
@@ -256,22 +267,27 @@ function makeLocalEngine(say) {
 
   return {
     name: 'breeze-local',
-    async convert({ text, output, seed: seedOverride }) {
+    async convert({ text, output, seed: seedOverride, instructions: overrideInstructions }) {
       const clean = String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, maxChars);
       if (!clean) throw Object.assign(new Error('要读的文字是空的'), { code: 'E_SAY_EMPTY' });
       if (refAudio && !fs.existsSync(refAudio)) {
         throw Object.assign(new Error(`参考音频不存在：${refAudio}`), { code: 'E_SAY_NO_REF' });
       }
 
+      // 情绪预设可以逐条覆盖「语气描述」；不传就用配置里那句
+      const effectiveInstruction = overrideInstructions === undefined
+        ? instruction
+        : String(overrideInstructions ?? '').trim();
+
       // 参考克隆模板没有 negative prompt，带 cfg_scale>1 会 500
       // （ValueError: Template 'ref_clone_tata' does not define a negative prompt but cfg_scale=4.0）；
       // 只有"参考 + instruction"（Voice Direction）才允许 CFG。
       let effectiveCfg = cfgScale;
-      if (refAudio && !instruction && effectiveCfg > 1) effectiveCfg = 1;
+      if (refAudio && !effectiveInstruction && effectiveCfg > 1) effectiveCfg = 1;
 
       const form = new FormData();
       form.set('text', clean);
-      if (instruction) form.set('instruction', instruction);
+      if (effectiveInstruction) form.set('instruction', effectiveInstruction);
       if (effectiveCfg > 0) form.set('cfg_scale', String(effectiveCfg));
       form.set('seed', String(Number.isFinite(Number(seedOverride)) ? Number(seedOverride) : seed));
       if (refAudio) {

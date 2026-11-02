@@ -1,6 +1,7 @@
 // 网关配置：读 config.json，给默认值，把"配错了"变成启动时的一句人话。
 import fs from 'node:fs';
 import path from 'node:path';
+import { mergeEmotions } from './emotions.mjs';
 
 export const DEFAULT_CONFIG = Object.freeze({
   port: 8899,
@@ -22,6 +23,8 @@ export const DEFAULT_CONFIG = Object.freeze({
     languageCode: '',
     instructions: '',
     guidanceScale: 0,
+    // 情绪通道：允许文字里的【生气】标记（或 /v1/audio/speech 的 body.emotion）逐句换语气
+    emotionTag: true,
     outputFormat: 'mp3_24000_128'
   },
   voice: { engine: 'none', command: '', timeoutMs: 600000, pitch: 0, outputExt: 'wav', defaultVoice: 'me',
@@ -97,6 +100,9 @@ export function normalizeConfig(raw, { rootDir = process.cwd() } = {}) {
       languageCode: asString(sayInput.languageCode),
       instructions: asString(sayInput.instructions),
       guidanceScale: Number(sayInput.guidanceScale) >= 0 ? Number(sayInput.guidanceScale) : 0,
+      // 情绪：文字里的【生气】/【撒娇】标记 → 换表演指令 + 音频加工，音色仍是同一个 voice_id
+      emotionTag: sayInput.emotionTag !== false,
+      emotions: mergeEmotions(sayInput.emotions),
       outputFormat: asString(sayInput.outputFormat) || 'mp3_24000_128',
       timeoutMs: asInt(sayInput.timeoutMs, DEFAULT_CONFIG.say.timeoutMs, 5000, 300000),
       // 本地 Breeze（breeze_infer.api）：走 multipart + 裸 PCM，用参考音频克隆或纯语气设计

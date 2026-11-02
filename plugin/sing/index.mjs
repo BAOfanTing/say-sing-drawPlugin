@@ -347,7 +347,7 @@ const tools = {
   },
 
 
-  /** 查「说话」后端状态：在线、音色、余额。 */
+  /** 查「说话」后端状态：在线、音色、余额、可用情绪标记。 */
   say_status: async () => {
     const conf = await loadConfig();
     await syncSayConfig(conf);
@@ -360,7 +360,10 @@ const tools = {
       hasKey: Boolean(status.hasKey),
       balance: status.balance ?? null,
       model: status.model || '',
-      note: status.note || (status.online ? '后端在线' : '后端不可用')
+      note: status.note || (status.online ? '后端在线' : '后端不可用'),
+      // 情绪通道：说语音时可以在台词最前面写【生气】【撒娇】这类标记
+      emotionTag: status.emotionTag !== false,
+      emotions: Array.isArray(status.emotions) ? status.emotions : []
     };
   },
 
