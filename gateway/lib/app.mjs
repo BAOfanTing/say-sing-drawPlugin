@@ -89,6 +89,17 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+async function readRawBody(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY_BYTES) throw Object.assign(new Error('请求体过大'), { code: 'E_TOO_BIG' });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString('utf8') || '{}';
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   let size = 0;
@@ -805,6 +816,38 @@ export function createApp({
     });
 
     // /health 免鉴权：只暴露"在不在、什么引擎"，方便排查隧道通不通
+    // ── 画图：透传到本地出图服务（draw/ 里的 Python 服务）────────────────
+    // 宿主控制台的「图片生成 → 服务地址」可以直接指向本网关，也可以指向 draw 服务本身；
+    // 走网关的好处是能拿到统一的 GPU 仲裁（唱歌/说话在跑时排队），并复用网关令牌。
+    if ((pathname === '/v1/images/generations' || pathname === '/images/generations') && req.method === 'POST') {
+      if (!config.draw?.url) {
+        throw Object.assign(new Error('画图后端没配置（draw.url），见 docs/DRAW.md'), { code: 'E_DRAW_OFF' });
+      }
+      // ① 先把本地 TTS 的显存让出来（它 8 GB，和画图不可能共存）
+      await yieldLocalSay();
+      // ② 唱歌在跑就排队等它结束（串行队列最多 1 个）
+      const waitedFrom = Date.now();
+      while (activeSingJobs > 0 && Date.now() - waitedFrom < 5 * 60 * 1000) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      const raw = await readRawBody(req);
+      const headers = { 'content-type': 'application/json' };
+      if (config.draw.token) headers.authorization = `Bearer ${config.draw.token}`;
+      const target = `${String(config.draw.url).replace(/\/$/, '')}/v1/images/generations`;
+      const response = await fetch(target, {
+        method: 'POST', headers, body: raw,
+        signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
+      });
+      const text = await response.text();
+      console.log(`[draw] → ${target} ${response.status}`);
+      res.writeHead(response.status, {
+        'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
+        'content-length': Buffer.byteLength(text)
+      });
+      res.end(text);
+      return;
+    }
+
     if (pathname === '/health') {
       const voiceConfigured = voice.name !== 'none';
       sendJson(res, 200, {

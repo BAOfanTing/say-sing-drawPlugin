@@ -15,12 +15,26 @@ numpy 2.4.6、torch 2.9.1、transformers 4.57.3 这一套组合，RVC 的换声�
 > 老环境用的是 numpy 1.26 + torch 2.7.1，也能跑唱歌；但本地说话要求 torch 2.9.1 + numpy≥2，
 > 所以想"一套环境两用"就要按下面这套版本来。
 
+## 环境布局：两个环境，三件事
+
+| 环境 | 路径 | 负责 | 关键版本 |
+|---|---|---|---|
+| **`say-sing`** | `E:\APP\Anaconda\envs\say-sing` | **说话（Breeze TTS）+ 唱歌（RVC）** | torch 2.9.1+cu128 / transformers 4.57.3 / numpy 2.4.6 |
+| **画图 venv** | `<仓库>\draw-model\.venv` | **画图（Qwen-Image-2.1-Turbo）** | torch 复用 say-sing / diffusers 0.42.1 / transformers 5.22.1 |
+
+画图的 venv 用 `python -m venv --system-site-packages draw-model\.venv` 建（复用 say-sing 的 torch），
+**不要把 diffusers 装进 say-sing**：diffusers 0.42 要求 `huggingface_hub>=1.32`，而 `qwen-tts` 钉死
+`transformers==4.57.3`（要 hub<1.0）—— 两者在同一个环境里不可能同时满足。详见 [DRAW.md](DRAW.md)。
+
+> 早期用的是两个环境（`sing` 说话 / `rvc` 唱歌），2026-11-02 合并成 `say-sing` 一个：
+> RVC 换声实测在 torch 2.9.1 + numpy 2.4 下正常（27-33 秒/首）。
+
 ## 从零装（Windows）
 
 ```powershell
 # 0) 建环境（Python 3.10+，验证过 3.11）
-conda create -n sing python=3.11 -y
-conda activate sing
+conda create -n say-sing python=3.11 -y
+conda activate say-sing
 
 # 1) torch 走 cu128 索引（PyPI 上是 CPU 版，装错会 torch.cuda.is_available()=False）
 python -m pip install torch==2.9.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu128

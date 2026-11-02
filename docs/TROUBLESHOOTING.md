@@ -2,7 +2,7 @@
 
 ## 宿主报 `HTTP 524`（唱歌/说话时）
 
-Cloudflare **快速隧道**对源站响应时间有约 100 秒限制，唱歌（尤其整首）必然越线 → 524。
+Cloudflare **快速隧道**对源站响应时间有约 100 秒限制。单首歌通常 43 秒能跑完，但冷启动 + 排队 + 超长歌**可能**越线 → 524（不是必然）。要稳定就把语音条切到 8898 专线。
 换成本机专线即可：
 
 ```bash
@@ -140,7 +140,7 @@ bash /opt/qq-agent/set-gateway-url.sh https://新域名.trycloudflare.com [网�
 
 ```powershell
 # ① 网关活着吗
-curl http://127.0.0.1:8899/health          # 看 "say" 字段是 breeze / breeze-local / none
+curl http://127.0.0.1:8899/health          # 看 "say" 字段是 auto / breeze / breeze-local / none
 
 # ② 说话后端状态（云端看 balance，本地看 localRunning/idleMs）
 curl -H "authorization: Bearer <网关令牌>" http://127.0.0.1:8899/say/status

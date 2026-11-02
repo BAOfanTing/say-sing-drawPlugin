@@ -76,12 +76,13 @@ bash /opt/qq-agent/check-lines.sh      # 隧道口 / 8898 / 宿主 TTS 真链路
 | 章节 | 内容 |
 |---|---|
 | 0 | 目录结构 |
-| 1-3 | 电脑端：Python 环境、RVC 资产、音色权重 |
-| 4-6 | 电脑端：网关配置、启动、暴露 https |
-| 7-10 | 服务器端：装插件、填设置、语音条通道、容器桥接 |
-| 11 | 网易云扫码登录（VIP 曲原唱） |
-| 12-13 | 开机自启、服务器 IPv6 加固 |
-| 14 | 发帖/写文档时的截图清单 |
+| 1（1.1-1.11） | **部署主体**：Python 环境 → RVC 资产 → 音色权重 → 网关配置 → 启动 → 暴露 https → 装插件 → 填设置 → 语音条通道 → 容器桥接 → 画图（可选） |
+| 2 | 网易云扫码登录（VIP 曲原唱） |
+| 3 | 服务器侧 IPv6 加固（一次性） |
+| 4 | 发帖/写文档时的截图清单 |
+| 5 | 开机自启用计划任务（Windows） |
+
+> 最上面「关掉之后怎么重新起」是三步速查（起网关 → 暴露 https → 填地址），和下面 1.x 是同一套东西的精简版。
 
 ---
 
@@ -90,7 +91,7 @@ bash /opt/qq-agent/check-lines.sh      # 隧道口 / 8898 / 宿主 TTS 真链路
 ```
 plugin/sing/          qq-agent 插件本体（零依赖，可打包上架）
   plugin.json         manifest（apiVersion 2；能力 tools/schedule/log/config/secrets/http/media/send）
-  index.mjs           协议接线 + 三个工具 + 每小时一次的零点清理触发
+  index.mjs           协议接线 + 七个工具 + 每小时一次的零点清理/领额度触发
   lib.mjs             纯函数（地址校验、设置收敛、文件名白名单、任务状态机）
 gateway/              跑在你电脑上的换声网关（零依赖 Node）
   server.mjs          入口；含每天 00:00 的成品清理排程
@@ -98,7 +99,8 @@ gateway/              跑在你电脑上的换声网关（零依赖 Node）
   lib/sources.mjs     音源：网易云 / 本地目录（含搜索排序打分）
   lib/voice.mjs       换声：none（直出）/ command（调你的 RVC 命令行）
   lib/app.mjs         路由 + 流水线（/health /search /sing /jobs /files /v1/audio/speech
-                      /say/status /say/voices /say/config /admin/voice-seconds /admin/prune /login*）
+                      /say/status /say/voices /say/config /admin/voice-seconds /admin/prune
+                      /v1/images/generations /login*）
   web/login.html      网易云扫码登录页（二维码在本地渲染，key 不出本机）
   web/qrcode.js       内置 QR 生成库（MIT，离线可用，不依赖任何 CDN）
   plugin/sing/vendor/qrcode.cjs  插件自带的 QR 库（控制台「扫码登录」用；.cjs 是因为仓库是 type=module）
@@ -113,7 +115,7 @@ docs/TROUBLESHOOTING.md  排错（含容器化 OneBot 发文件失败那个坑�
 docs/TUNING.md       调优与踩坑笔记（时长四道闸、显存、历史踩坑、验收清单）
 scripts/bridge-container-paths.sh  把插件媒体目录桥接进 OneBot 容器
 start-gateway.bat / start-tunnel.bat  Windows 一键启动
-test/                 41 个用例（含"子进程跑插件、测试扮演宿主"的真协议测试）
+test/                 52 个用例（5 个文件，含"子进程跑插件、测试扮演宿主"的真协议测试）
 ```
 
 ---
@@ -166,7 +168,7 @@ sing-model/rvc/assets/
 ```bash
 # hubert_base 与 rmvpe 来自 lj1995/VoiceConversionWebUI（国内可用 hf-mirror）
 # 分离模型用 pymss 的下载器（走 ModelScope，很快）
-conda run -n rvc python -m pymss.cli download model_bs_roformer_ep_368_sdr_12.9628.ckpt \
+conda run -n say-sing python -m pymss.cli download model_bs_roformer_ep_368_sdr_12.9628.ckpt \
   --model-dir rvc/assets/pymss_weights --source modelscope
 # 下载后可能在 vocal/vocal_extraction/ 子目录里，把 .ckpt 和 .yaml 复制到 pymss_weights/ 根目录
 ```
@@ -193,7 +195,7 @@ sing-model/rvc/assets/indices/<音色名>.index      ← 有就放，相似度�
 
 ```bash
 # 单测一句，确认权重能被加载
-conda run -n rvc python sing-model/run.py --input 任意音频.mp3 --output out.wav --voice hanser --max-seconds 20
+conda run -n say-sing python sing-model/run.py --input 任意音频.mp3 --output out.wav --voice hanser --max-seconds 20
 ```
 
 > ⚠️ 权重是**第三方角色模型**，用于他人都涉及肖像与授权问题；自己本地玩没问题，别把 `.pth` 提交到仓库（`.gitignore` 已排除）。
@@ -227,7 +229,7 @@ cp config.example.json config.json
 | `voice.gpuFraction` | 常驻进程的显存上限比例，默认 0.9 |
 | `say.engine` | `auto`（默认，云端优先 + 本地兜底）/ `breeze`（只云端）/ `breeze-local`（只本地权重）/ `none`（关掉，只说文字） |
 | `say.breezeKey` / `say.voiceId` | Breeze API Key 与音色 id；**在插件设置里填更省事**（插件会推到网关） |
-| `say.pitchTarget` / `say.pitchMaxShift` | 本地音高高的小幅归一（目标 Hz / 最多改几个半音，默认 355 / 2.5，`0` = 关） |
+| `say.pitchTarget` / `say.pitchMaxShift` | 本地音区小幅归一（目标 Hz / 最多改几个半音）。**默认 `0`（关）/ `3`**；常用目标值 `355` |
 | `say.registerMin` / `registerMax` / `registerRetries` | 本地音区守门：合成后测基频，不在 330-385 Hz 就换 seed 重生成（默认 2 次） |
 | `filesTtlHours` | 成品保留小时数（默认 24） |
 | `filesPruneMinAgeHours` | 清理只删**超过这么多小时**的成品（默认 8）。按文件年龄而不是自然日零点，避免 23:59 的歌 00:01 就没了 |
@@ -240,7 +242,7 @@ cp config.example.json config.json
   "source": { "type": "netease", "localDir": "", "neteaseCookie": "", "limit": 5 },
   "voice": {
     "engine": "command",
-    "command": "\"<conda路径>/envs/rvc/python.exe\" \"<仓库路径>/sing-model/run.py\" --input {input} --output {output} --voice {voice} --pitch {pitch} --max-seconds {maxSeconds}",
+    "command": "\"<conda路径>/envs/say-sing/python.exe\" \"<仓库路径>/sing-model/run.py\" --input {input} --output {output} --voice {voice} --pitch {pitch} --max-seconds {maxSeconds}",
     "timeoutMs": 900000, "pitch": 0, "outputExt": "wav", "defaultVoice": "hanser"
   },
   "transcode": "auto", "maxSeconds": 300, "voiceMessageMaxSeconds": 300, "voiceMessageDefaultSeconds": 180,
@@ -277,7 +279,7 @@ cloudflared tunnel --url http://127.0.0.1:8899 --no-autoupdate
 ```
 
 **快速隧道的域名每次重启都变**，变了要去插件设置里改一次。要固定就用 named tunnel / frp，
-见 [docs/TUNNEL.md](docs/TUNNEL.md)。
+见 [docs/TUNNEL.md](TUNNEL.md)。
 
 ### 1.7 服务器端：装插件
 
@@ -319,10 +321,10 @@ curl -X POST http://127.0.0.1:3210/api/plugins/settings \
 
 ### 1.9 语音条通道：把宿主 TTS 指向网关
 
-> ⚠️ 这里填的地址**不要用 Cloudflare 快速隧道**：宿主是同步等音频（几秒到一分半），
-> 快速隧道约 100 秒会回 `524`。请用本机专线 `https://127.0.0.1:8898/v1`
-> （配法见 [TUNNEL.md](TUNNEL.md) 的「备用专线」）或 named tunnel。
-> 插件的「网关地址」仍可继续用快速隧道 —— 它只发短请求。
+> ⚠️ **语音条通道建议走 8898 专线**（`https://<服务器IP>:8898/v1`，配法见 [TUNNEL.md](TUNNEL.md)
+> 的「备用专线」一节）。原因：宿主是**同步等音频**（几秒到一分半），而快速隧道约 100 秒回 `524` ——
+> 单首歌通常 43 秒跑得完，但冷启动 + 排队 + 超长歌就可能越线。
+> 插件的「网关地址」继续用快速隧道没问题（它只发短请求）。
 
 控制台 → 设置 → **语音回复 (TTS)**：
 
@@ -330,7 +332,7 @@ curl -X POST http://127.0.0.1:3210/api/plugins/settings \
 |---|---|
 | 允许机器人发语音 | **打开** |
 | 服务预设 | 自定义 / 自建（OpenAI 兼容 `/audio/speech`） |
-| 服务地址 | `https://<隧道域名>/v1` |
+| 服务地址 | **推荐** `https://<服务器IP>:8898/v1`（专线）；也可以填 `https://<隧道域名>/v1`（短语音够用，长歌可能 524） |
 | 模型 | 任意（网关不校验），建议填音色名 |
 | 音色 (voice) | 音色名，例如 `hanser` |
 | API Key | 网关令牌 |
@@ -372,7 +374,27 @@ sudo bash scripts/bridge-container-paths.sh
 
 ---
 
-## 11. 网易云扫码登录（VIP 曲原唱）
+### 1.11 画图（可选，本地扩散模型）
+
+想让机器人自己画图，再装一套出图后端（**纯 Python，不需要 ComfyUI**）：
+
+```powershell
+# 权重约 21 GB + 独立 venv，详见 draw-model/README.md 里的下载地址表
+powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1
+```
+
+然后控制台 → **图片生成**：
+
+| 字段 | 填什么 |
+|---|---|
+| 服务地址 | `https://<你的公网入口>/v1`（走网关，带 GPU 仲裁） |
+| 模型 | `qwen-image-2.1-turbo`（本地服务不看这个字段） |
+| API Key | 网关令牌 |
+
+实测（RTX 3080 10G）：1024×1024、8 步，**约 25 秒/张**，峰值显存 7.24 GB，出完自动回落到约 1.5 GB。
+细节、踩坑与显存账见 **[DRAW.md](DRAW.md)**。
+
+## 2. 网易云扫码登录（VIP 曲原唱）
 
 不登录时：只能唱**免费曲**；VIP 曲会提示"需要 VIP"（以前会偷偷退回 30 秒试听，现在不会了）。
 
@@ -394,7 +416,7 @@ sudo bash scripts/bridge-container-paths.sh
 
 ---
 
-## 13. 服务器侧 IPv6 加固（一次性）
+## 3. 服务器侧 IPv6 加固（一次性）
 
 服务器没有 IPv6 出口时，Node 的 fetch 会先试 AAAA，高峰期容易卡成 `fetch failed`：
 
@@ -408,14 +430,14 @@ su - qqagent -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user dae
 
 ---
 
-## 14. 发帖/写文档时的截图清单
+## 4. 发帖/写文档时的截图清单
 
 按这个顺序截，信息最全、也不暴露隐私：
 
 | # | 位置 | 截什么 | 注意 |
 |---|---|---|---|
 | 1 | 控制台 → 插件 → 点歌唱歌 | 插件卡片 + 「已启用」状态 + 七个工具名 | 别把「网关令牌」框截进去（截到也请打码） |
-| 2 | 控制台 → 设置 → 语音回复 (TTS) | 服务地址 `…/v1`、模型/音色 `hanser`、超时 180000 | **API Key 打码**；域名可以打码成 `https://***.trycloudflare.com` |
+| 2 | 控制台 → 设置 → 语音回复 (TTS) | 服务地址 `…/v1`、模型/音色 `hanser`、超时 600000 | **API Key 打码**；域名可以打码成 `https://***.trycloudflare.com` |
 | 3 | 网关的 `/login` 页面 | 二维码 + "请用网易云 App 扫一扫" | 二维码最好打码（扫了会用你的账号登录） |
 | 4 | QQ 群里的实际效果 | 用户那句「用语音唱一首雨爱」+ 收到的语音条 | 群名/昵称打码；这条最能说明"能用" |
 | 5 | 网关控制台窗口 | `点歌网关 v1.0.5 已启动` + `[req] · POST /v1/audio/speech → 200 (2s)` | 这条是"链路真的通了"的证据 |
@@ -425,7 +447,7 @@ su - qqagent -c 'export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user dae
 
 ---
 
-### 开机自启用计划任务（Windows）
+## 5. 开机自启用计划任务（Windows）
 
 网关和反向隧道都别用"后台任务"式启动（会话结束就没了），做成计划任务：
 

@@ -9,6 +9,9 @@ export const DEFAULT_CONFIG = Object.freeze({
   token: '',
   // 音源：netease（网易云，默认）| local（你自己的音频目录）
   source: { type: 'netease', localDir: '', neteaseCookie: '', limit: 5 },
+  // 画图：本地出图服务（draw/ 里的 Python 服务，OpenAI 兼容 /v1/images/generations）。
+  // 网关只做透传 + GPU 仲裁，模型跑在 draw/ 那个进程里。
+  draw: { url: 'http://127.0.0.1:7880', token: '', timeoutMs: 600000 },
   // 换声：none（直出原音，用于先跑通链路）| command（调你自己的 RVC/SVC 命令行）
   // 说话（TTS）：非点歌的文本走这里，只走 Breeze 云端
   say: {
@@ -58,6 +61,7 @@ export function normalizeConfig(raw, { rootDir = process.cwd() } = {}) {
   const source = input.source && typeof input.source === 'object' ? input.source : {};
   const voice = input.voice && typeof input.voice === 'object' ? input.voice : {};
   const sayInput = input.say && typeof input.say === 'object' ? input.say : {};
+  const drawInput = input.draw && typeof input.draw === 'object' ? input.draw : {};
 
   const config = {
     port: asInt(input.port, DEFAULT_CONFIG.port, 1, 65535),
@@ -132,6 +136,11 @@ export function normalizeConfig(raw, { rootDir = process.cwd() } = {}) {
       localAppDir: asString(sayInput.localAppDir),
       localStopCmd: asString(sayInput.localStopCmd),
       localStartCmd: asString(sayInput.localStartCmd)
+    },
+    draw: {
+      url: asString(drawInput.url) || DEFAULT_CONFIG.draw.url,
+      token: asString(drawInput.token),
+      timeoutMs: asInt(drawInput.timeoutMs, DEFAULT_CONFIG.draw.timeoutMs, 1000, 3600000)
     },
     // 意图识别：bareTitle=true 时，短且不带标点/空格的中文会被当成歌名。
     // 默认关：宿主 send_voice 也走这条通道，模型的口头禅（「好的」「收到」）会被当成歌名去唱歌。

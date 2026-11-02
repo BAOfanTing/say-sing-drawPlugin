@@ -14,7 +14,7 @@
 | ① | 插件设置「语音条唱多久」 | 插件设置页 → `voiceSeconds` → 通过 `POST /admin/voice-seconds` 推给网关 | **0（整首）** |
 | ② | 语音条通道硬上限 | `gateway/lib/app.mjs`：`cap = config.voiceMessageMaxSeconds` | 600 |
 | ③ | 单次任务上限（语音条和群文件**都**受它管） | `gateway/lib/app.mjs`：`runSingJob` 里 `Math.min(config.maxSeconds, …)` | 600 |
-| ④ | 宿主 TTS 请求超时 | `tts.timeoutMs`（宿主 config.json） | 600000 |
+| ④ | 宿主 TTS 请求超时 | `tts.timeoutMs`（宿主 config.json） | 600000（**需手动调**，宿主出厂默认只有 120000） |
 
 生效值链路：
 
@@ -89,7 +89,7 @@ RVC 是整段一次性推理，显存和耗时都随长度超线性涨（曾经 
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `run.py --segment-seconds` | **30** | 每段长度；0 = 不分段 |
+| `run.py --segment-seconds` | **30** | 每段长度；0 = 不分段。⚠️ `run.py` **自己的默认是 75**，正常跑都会被网关按 30 覆盖 |
 | `run.py --segment-retries` | 1 | 单段失败重试次数（失败只重跑那一段） |
 | `gateway/config.json` → `voice.segmentSeconds` | **30** | 上面那个值的配置来源，通过 `{segmentSeconds}` 占位符传下去 |
 
@@ -135,7 +135,7 @@ RVC 是整段一次性推理，显存和耗时都随长度超线性涨（曾经 
 |---|---|---|
 | 说一句话（5 秒音频 + 换声） | 14 秒 | **3 秒**（首句 12 秒） |
 | 唱 45 秒 | 27 秒 | **12 秒** |
-| 唱整首 3:54 | 82 秒 | **22 秒** |
+| 唱整首 3:54 | 85 秒 | **22 秒** |
 
 ⚠️ 常驻会一直占着约 1.5-2 GB 显存；整首时分离模型（pymss）是另一个进程，
 两者叠加峰值约 9 GB。显存吃紧就把 `serveIdleMs` 调小，让它更快退出。

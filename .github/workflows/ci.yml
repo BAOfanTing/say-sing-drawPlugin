@@ -28,4 +28,5 @@ jobs:
             test/plugin-lib.test.mjs \
             test/gateway-jobs.test.mjs \
             test/gateway-app.test.mjs \
+            test/gateway-emotions.test.mjs \
             test/plugin-protocol.test.mjs

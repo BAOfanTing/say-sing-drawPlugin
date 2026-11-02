@@ -1,9 +1,10 @@
-﻿# 一键跑起来：检查环境 → 体检权重 → 生成配置 → 起网关 → 起 Cloudflare 隧道 → 打印地址
+﻿# 一键跑起来：检查环境 → 体检权重 → 生成配置 → 起网关 →（有画图权重就）起出图服务 → 起隧道 → 打印地址
 #
 # 用法：
-#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1                 # 前台跑（Ctrl+C 停）
-#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1 -Detach         # 计划任务常驻
-#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1 -NoTunnel       # 只要本地网关
+#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1              # 说话+唱歌（有画图权重就自动带上）
+#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1 -NoDraw     # 只要说话+唱歌
+#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1 -Detach     # 计划任务常驻
+#   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1 -NoTunnel   # 只要本地网关
 #
 # 做了什么：
 #   1. 找 node / python，缺哪个直接告诉你
@@ -11,10 +12,12 @@
 #      python 路径、本地权重路径（本机情况自动探测，不用手改）
 #   3. 有 Breeze 权重就跑 say-model\check-ckpt.py 体检
 #   4. 起网关（前台或计划任务）
-#   5. 起 cloudflared quick tunnel，等它给出 https 地址并打印
+#   5. 有画图权重（draw-model\weights\turbo-dit）就顺手把出图服务拉起来（默认带，-NoDraw 关掉）
+#   6. 起 cloudflared quick tunnel，等它给出 https 地址并打印
 param(
     [switch]$Detach,
     [switch]$NoTunnel,
+    [switch]$NoDraw,
     [string]$Python = '',
     [string]$Cloudflared = '',
     [int]$Port = 8899
@@ -34,11 +37,11 @@ Write-Host ("✓ node " + (& $node -v)) -ForegroundColor Green
 if (-not $Python) {
     # 常见位置 + conda 环境逐个试
     $cands = @(
-        (Join-Path $env:USERPROFILE 'miniconda3\envs\sing\python.exe'),
-        'E:\APP\Anaconda\envs\sing\python.exe',
-        'C:\ProgramData\Anaconda3\envs\sing\python.exe'
+        (Join-Path $env:USERPROFILE 'miniconda3\envs\say-sing\python.exe'),
+        'E:\APP\Anaconda\envs\say-sing\python.exe',
+        'C:\ProgramData\Anaconda3\envs\say-sing\python.exe'
     )
-    foreach ($envName in @('sing', 'breeze')) {
+    foreach ($envName in @('say-sing', 'sing', 'breeze')) {
         $base = (Get-Command conda -ErrorAction SilentlyContinue)
         if ($base) {
             $condaRoot = Split-Path -Parent (Split-Path -Parent $base.Source)
@@ -166,14 +169,52 @@ if ($NoTunnel) {
         if ($url) {
             Write-Host ''
             Write-Host "✓ 隧道地址：$url" -ForegroundColor Green
-            Write-Host '  下一步（服务器上跑，把插件和 TTS 都指过去）：' -ForegroundColor Cyan
-            Write-Host "    bash /opt/qq-agent/set-gateway-url.sh $url $token"
-            Write-Host "    bash /opt/qq-agent/set-tts-url.sh $url/v1"
+            Write-Host '  下一步（在你自己电脑上跑，插件 → 隧道、语音条 → 8898 专线一次改完）：' -ForegroundColor Cyan
+            Write-Host '    powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root@<你的服务器IP>'
+            Write-Host "    （脚本会：插件 gatewayUrl = $url；tts.baseUrl = https://<服务器IP>:8898/v1）" -ForegroundColor DarkGray
             Write-Host ''
             Write-Host "  网关令牌（填进插件「网关令牌」）：$token" -ForegroundColor Cyan
             Write-Host '  ⚠ 快速隧道地址每次重启都会变，变了就重跑上面两条命令（或改用 ssh -R 专线，见 docs\TUNNEL.md）' -ForegroundColor Yellow
         } else {
             Write-Host '⚠ 隧道没起来，看 logs\cloudflared.log；本地网关仍可用' -ForegroundColor Yellow
+        }
+    }
+
+    # ── 画图服务（有权重才拉起来；-NoDraw 可关）────────────────
+    if (-not $NoDraw) {
+        $drawWeights = Join-Path $repo 'draw-model\weights\turbo-dit\transformer'
+        $drawStart = Join-Path $repo 'draw-model\start-draw.ps1'
+        $hasWeights = (Test-Path $drawWeights) -and
+            (Get-ChildItem $drawWeights -Filter '*.safetensors' -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if (-not $hasWeights) {
+            Write-Host ''
+            Write-Host '· 没找到画图权重，跳过出图服务（想开画图见 draw-model\README.md 的下载地址表）' -ForegroundColor DarkGray
+        } elseif (-not (Test-Path $drawStart)) {
+            Write-Host '⚠ 有画图权重但没有 draw-model\start-draw.ps1' -ForegroundColor Yellow
+        } else {
+            Write-Host ''
+            Write-Host '▶ 起出图服务（7880，闲置 5 分钟自动卸载）…' -ForegroundColor Cyan
+            $task = schtasks.exe /Query /TN 'QQAgentDrawService' 2>$null
+            if ($task) {
+                schtasks.exe /Run /TN 'QQAgentDrawService' | Out-Null
+            } else {
+                Start-Process -FilePath 'powershell.exe' `
+                    -ArgumentList @('-ExecutionPolicy', 'Bypass', '-NoProfile', '-WindowStyle', 'Hidden', '-File', $drawStart) `
+                    -WindowStyle Hidden | Out-Null
+            }
+            $drawUp = $false
+            for ($i = 0; $i -lt 20; $i++) {
+                Start-Sleep -Seconds 2
+                $code = & curl.exe -s -m 5 -o NUL -w '%{http_code}' 'http://127.0.0.1:7880/health' 2>$null
+                if ($code -eq '200') { $drawUp = $true; break }
+            }
+            if ($drawUp) {
+                Write-Host '✓ 出图服务已就绪：http://127.0.0.1:7880' -ForegroundColor Green
+                Write-Host '  控制台 → 图片生成 → 服务地址填 <上面那个网关地址>/v1、模型随便填、API Key 填网关令牌' -ForegroundColor Cyan
+                Write-Host '  （1024×1024 / 8 步约 25 秒/张，首张要加载 13 GB 权重）' -ForegroundColor DarkGray
+            } else {
+                Write-Host '⚠ 出图服务没起来，看 draw-model\logs\draw-service.err.log' -ForegroundColor Yellow
+            }
         }
     }
 }

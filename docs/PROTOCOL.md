@@ -144,5 +144,31 @@ Content-Type: application/json
 // POST /login/logout         → 清掉已存的网易云 Cookie
 ```
 
+## POST /v1/images/generations（画图，透传）
+
+画图不在网关里跑（网关是 Node，模型是 Python + diffusers），网关只做**透传 + GPU 仲裁**：
+
+```json
+// 请求（OpenAI 兼容）
+POST /v1/images/generations
+{ "model": "qwen-image-2.1-turbo", "prompt": "…", "n": 1, "size": "1024x1024" }
+
+// 响应
+{ "created": 1793630507, "data": [ { "b64_json": "iVBORw0KGgo…" } ] }
+```
+
+网关做的事：
+
+1. 先把本地 TTS 让出显存（它占 8 GB，和画图不可能共存）；
+2. 唱歌任务在跑就排队等它结束（串行队列最多 1 个）；
+3. 转发到 `draw.url`（默认 `http://127.0.0.1:7880`），带 `draw.token`（如果配了）；
+4. 原样返回上游的状态码与响应体。
+
+`size` 只取 `宽x高` 的宽（如 `1024x1024` → 1024）；`steps` 可选，不传就用 Turbo 官方的
+`sample_sigmas`（8 个断点）。**首张较慢**（要加载 13 GB 权重并做 nf4 量化），之后每张约 25 秒。
+
+> 宿主控制台的「图片生成 → 服务地址」填 `https://<公网入口>/v1` 即可（它自己拼 `/images/generations`）。
+> 单独部署的出图服务（`draw-model/server.py`）实现同一套接口，也可以直连。
+
 `/login/*` **只认请求头**（`x-gateway-token` 或 `Authorization: Bearer`），不接受 `?token=`
 （URL 查询参数会留在浏览器历史、隧道日志与 Referer 里）；扫码页面自己从 `location.hash` 取令牌。

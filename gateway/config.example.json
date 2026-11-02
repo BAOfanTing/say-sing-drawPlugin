@@ -61,5 +61,10 @@
   "filesPruneMinAgeHours": 8,
   "intent": {
     "bareTitle": false
+  },
+  "draw": {
+    "url": "http://127.0.0.1:7880",
+    "token": "",
+    "timeoutMs": 600000
   }
 }

@@ -1,6 +1,6 @@
-# 三步跑起来
+# 三步跑起来（+ 可选的画图一步）
 
-前提：源码已有、Python 环境装好（`conda activate sing`）、Breeze 权重放进 `say-model/weights/breeze-tts-2/`。
+前提：源码已有、Python 环境装好（`conda activate say-sing`）、Breeze 权重放进 `say-model/weights/breeze-tts-2/`。
 
 ---
 
@@ -10,7 +10,7 @@
 python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-> 说话只走云端的话，可以只装 `fastapi uvicorn`，跳过 torch/triton（见 [ENV.md](ENV.md)）。
+> **唱歌必须要 torch**（RVC 换声），所以别为了省事跳过大件。只想跑唱歌+云端说话的话，可以从 `requirements.txt` 里删掉 `triton-windows` / `qwen-tts` / `transformers` 三行（见 [ENV.md](ENV.md)）。
 > 国内下 torch 那个 2.67 GB 轮子慢，文件头有手动下载的做法。
 
 ---
@@ -68,6 +68,36 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root
 
 ---
 
+## ④ 画图（可选，加一条命令）
+
+想让机器人自己画图（本机 Qwen-Image-2.1-Turbo，1024² / 8 步约 **25 秒/张**、峰值显存 7.24 GB）：
+
+```powershell
+# 1) 下权重（约 21 GB，逐文件直链见 draw-model/README.md 的「权重清单与下载地址」）
+#    DiT 13.25 GB + 文本编码器 7.17 GB + VAE 0.63 GB，全放 draw-model\weights\
+
+# 2) 起出图服务（7880，闲置 5 分钟自动卸载）
+powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1
+
+# 3) 自检
+curl.exe http://127.0.0.1:7880/health
+# → {"ok":true,"loaded":false,...}   loaded=false 表示还没加载（第一张图时才加载）
+```
+
+控制台 → **图片生成**：
+
+| 字段 | 填什么 |
+|---|---|
+| 允许机器人画图 | 打开 |
+| 服务地址 | `https://<你的服务器IP>:8898/v1`（走网关，带 GPU 仲裁）或 `http://127.0.0.1:7880/v1`（同机直连） |
+| 模型 | `qwen-image-2.1-turbo`（本地服务不看这个字段） |
+| API Key | 网关令牌 |
+
+然后在群里说「画一张 蓝色长发的小鲸鱼娘在海边」，收到图就通了。
+
+> 用 `scripts\start-all.ps1` 的话，只要 `draw-model\weights\turbo-dit\transformer\` 里有分片，
+> **出图服务会自动一起拉起来**，不需要单独跑第 2 步（`-NoDraw` 可关）。
+
 # 到此就完了。下面是备注
 
 ## 隧道地址变了怎么办
@@ -81,7 +111,8 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root
 它从 `logs\cloudflared.log` 里读最新地址并同步到服务器，不用手抄。
 
 嫌麻烦就改用 **ssh -R 专线**（地址永不变、无 100 秒上限），见 [TUNNEL.md](TUNNEL.md)「备用专线」。
-实测整首 3:54 的歌走隧道端到端约 **43 秒**（**含冷启动**；换声进程常驻后约 22 秒），**不会**撞上 Cloudflare 的 100 秒上限；只有极端情况（冷启动 + 超长歌）才会 524。
+快速隧道能跑通单首歌（整首 3:54 端到端约 43 秒，含冷启动；换声常驻后约 22 秒），但**冷启动 + 排队 + 超长歌可能越过 100 秒上限**（→ 524）。要稳定就把语音条切到 8898 专线；插件的「网关地址」继续用隧道没问题（它只发短请求）。
+> `sync-host-url.ps1` 默认就把这两件事分开：插件 → 隧道，语音条 → `https://<服务器IP>:8898/v1`。
 
 ## 想改配置
 
@@ -97,13 +128,13 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root
 | `say.registerMin` / `registerMax` / `registerRetries` | 本地音区守门：合成后测基频，不在 330-385 Hz 就换 seed 重生成（最多 2 次，仅对 ≤12 秒音频） |
 | `say.localIdleMs` | 本地模型闲置多久退出，默认 `60000`（1 分钟）；`0` = 常驻不退 |
 | `say.splitSentences` / `maxSegmentChars` | 长回复是否按句切开分别合成（**默认关**）：开会更快拉平音高，但一条消息里音色会变，不建议 |
-| `say.pitchTarget` / `pitchMaxShift` | 音区微调：目标 Hz（如 `355`，`0` = 关）与最大改动半音数（默认 **2.5**）。只做小幅微调，超出就不动 —— 长文本那种 4-6 半音的偏差强行抬会明显走味，靠 `say.registerMin/Max` 换 seed 解决 |
+| `say.pitchTarget` / `pitchMaxShift` | 音区微调：目标 Hz（**默认 `0` = 关**，常用 `355`）与最大改动半音数（**默认 3**）。只做小幅微调，超出就不动 —— 长文本那种 4-6 半音的偏差强行抬会明显走味，靠 `say.registerMin/Max` 换 seed 解决 |
 | `voice.defaultVoice` | 唱歌音色，即 `sing-model/weights` 里 `.pth` 的文件名 |
 
 改完重启：`schtasks /End /TN QQAgentSingGateway` → `schtasks /Run /TN QQAgentSingGateway`
 （前台模式就直接 Ctrl+C 再跑一次）
 
-## 四条自检
+## 自检
 
 ```powershell
 curl http://127.0.0.1:8899/health

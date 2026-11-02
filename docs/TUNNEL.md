@@ -2,10 +2,10 @@
 
 > **先用方案一（Cloudflare 快速隧道）**：零成本、自动证书、一条命令。
 > 实测整首 3:54 的歌走隧道端到端约 **43 秒**（含冷启动；常驻后约 22 秒），**不会**撞上它的 100 秒上限。
-> 只有极端情况（模型冷启动 + 超长歌）才可能 524 —— 那时再换下面的「备用专线」。
+> 快速隧道能跑通单首歌（整首 3:54 端到端约 43 秒，含冷启动；换声常驻后约 22 秒），但**冷启动 + 排队 + 超长歌可能越过 100 秒上限**（→ 524）。要稳定就把语音条切到 8898 专线；插件的「网关地址」继续用隧道没问题（它只发短请求）。
 
 > ⚠️ **快速隧道（trycloudflare 匿名隧道）有个硬约束：源站超过约 100 秒没响应，Cloudflare 就回 `524`。**
-> 唱歌要几十秒到一分半（整首 4 分钟约 83 秒，再排个队就越线），**所以语音条那条通道不要走快速隧道**。
+> 唱歌要几十秒到一分半（整首 3:54 每次起进程约 85 秒、换声常驻约 22 秒，再排个队就可能越线），**所以语音条那条通道建议走 8898 专线**。
 >
 > | 通道 | 走哪 | 原因 |
 > |---|---|---|
@@ -109,7 +109,7 @@ loginctl enable-linger "$USER"
 
 ---
 
-## 可选：ssh -R + nginx TLS 专线（地址永不变，没有 100 秒上限）
+## 备用专线：ssh -R + nginx TLS（地址永不变，没有 100 秒上限）
 
 快速隧道（`trycloudflare.com`）是 Cloudflare 明说"无可用性保证"的免费通道，偶发抖动。
 如果受够了，可以改走**你自己服务器的反向隧道 + nginx TLS**：
@@ -132,7 +132,7 @@ nginx -t && systemctl reload nginx
 
 ```powershell
 # 你电脑
-powershell -ExecutionPolicy Bypass -File scripts/run-tunnel-local.ps1 -Host root@<你的服务器IP>
+powershell -ExecutionPolicy Bypass -File scripts/run-tunnel-local.ps1 -SshHost root@<你的服务器IP>
 ```
 
 ```bash
@@ -155,3 +155,26 @@ nginx -t && systemctl reload nginx
 
 > 宿主的 `NODE_EXTRA_CA_CERTS=/opt/qq-agent/tls/ca.crt` 一直留着没坏处（只影响自签那几条链路）。
 > 证书链坏了（CA 重建过）就跑 `bash reissue-server-cert.sh`。
+
+## 看门狗：后端 502 / 掉线自愈
+
+宿主机看到 **502** 通常不是"电脑关了"，而是两种情况之一：
+
+| 现象 | 原因 | 看门狗怎么处理 |
+|---|---|---|
+| 502 但电脑在跑 | 隧道活着，**本地网关 8899 挂了** | 重启 `QQAgentSingGateway` 任务 |
+| 502 且电脑在跑 | **ssh 反向隧道断了** | 重启 `QQAgentSingTunnel` 任务 |
+| 画图报错 | 出图服务 7880 没起来 | 重启 `QQAgentDrawService` 任务 |
+
+一键注册（每 5 分钟检查一次，只在挂了时才动手）：
+
+```powershell
+schtasks /Create /TN "QQAgentWatchdog" /SC MINUTE /MO 5 /RL HIGHEST /F ^
+  /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File <仓库路径>\scripts\watchdog.ps1"
+```
+
+日志在 `logs/watchdog.log`，**只有发生重启时才写**，平时不会刷屏。
+
+> 注意：手动 `schtasks /Run /TN QQAgentSingTunnel` 时如果隧道已经连着，会因为远端端口占用而
+> `ExitOnForwardFailure` 退出、5 秒后重连——中间会有十几秒 502。要重启就先确认没有 ssh 进程。
+

@@ -19,7 +19,7 @@
 |---|---|---|
 | **说话**（TTS） | ✅ 已上线 | 机器人用 Breeze TTS 2 说话：云端优先（3-6 秒/句），本地兜底（8.2 GB 显存，闲置自退） |
 | **唱歌**（换声） | ✅ 已上线 | 群里说「用语音唱一首 X」，用你自己训练的 RVC 音色翻唱，发 QQ 语音条 |
-| **画图**（本地扩散模型） | 🚧 接入中 | 本地跑 Qwen 图像模型，宿主直接走 OpenAI 兼容的 `/images/generations` —— 方案与前置条件见 [docs/DRAW.md](docs/DRAW.md) |
+| **画图**（本地扩散模型） | ✅ 已上线 | 本机跑 Qwen-Image-2.1-Turbo，1024² / 8 步 **约 25 秒/张**（峰值显存 7.24 GB）；宿主直接走 OpenAI 兼容的 `/images/generations`，详见 [docs/DRAW.md](docs/DRAW.md) |
 
 > 插件 id 仍叫 `sing`（历史原因）：改 id 等于变成新插件，已装用户的设置、凭据、
 > 成品目录都会丢，所以仓库名扩了、id 不动。
@@ -29,14 +29,7 @@
 
 ![image-20261030100547632](https://gitee.com/baofanting/image/raw/master/image/20261030100547692.png)
 
-![image-20261030100609669](https://gitee.com/baofanting/image/raw/master/image/20261030100609713.png)
-
-## 听一下
-
-| 效果 | 怎么来的 | 试听 |
-|---|---|---|
-| **说话 · 本地** | 本地 Breeze TTS 2，音色由一句文字描述生成（`清亮通透的少女音，软糯但不嗲`） | [▶ 2-say-local.mp3](assets/samples/2-say-local.mp3) |
-| **说话 · 云端** | 云端 Breeze，预置音色「大肥鱼（迷糊版）」 | [▶ 1-say-cloud.mp3](assets/samples/1-say-cloud.mp3) |
+![image-20261102225245056](https://gitee.com/baofanting/image/raw/master/image/20261102225245184.png)
 
 ## 它怎么工作
 
@@ -60,7 +53,7 @@ QQ 群 ──► 宿主(服务器) ──► 插件 sing ───────�
 | **唱歌 · 语音条**（默认） | 「用语音唱一首 X」 | QQ 语音气泡 | 本机 RVC 换声；默认唱**整首**（实测 4:21 完整歌能收播），整首 3:54 常驻换声约 22 秒（冷启动端到端约 43 秒） |
 | **唱歌 · 群文件** | 「点歌唱一首 X」 | mp3 文件 | 同上，但要先在插件设置里打开「允许发群文件」；工具超时 300 秒 |
 | **说话** | 机器人自己想说话（任何非点歌内容） | QQ 语音气泡 | Breeze TTS 2：云端 3-6 秒/句，或本机 11-16 秒/句（8.2 GB 显存，闲置自退） |
-| **画图** | 🚧 接入中 | QQ 图片 | 本机扩散模型 → 网关暴露 OpenAI 兼容 `/images/generations` → 宿主控制台「图片生成」直连；不占插件通道（插件只能发群文件，私聊发图走宿主） |
+| **画图** | 群里说「画一张 …」 | QQ 图片 | 本机 Qwen-Image-2.1-Turbo（nf4 量化）→ 网关暴露 OpenAI 兼容 `/images/generations` → 宿主「图片生成」直连；1024² / 8 步约 25 秒 |
 
 判定规则很简单：**文本里能认出点歌意图（`唱：歌名` / `点歌唱…` / 句中触发）就走换声，其余当说话。**
 说话失败会退回文字，不影响唱这条主链路。
@@ -72,28 +65,43 @@ QQ 群 ──► 宿主(服务器) ──► 插件 sing ───────�
 python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # ② 一条命令起网关 + 隧道（自动体检权重、生成配置、打印隧道地址和令牌）
+#    有画图权重的话，出图服务也会一起拉起来；不想带就加 -NoDraw
 powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1
 
-# ③ 把隧道地址同步到服务器（插件 + 语音条通道一次改完）
+# ③ 把地址同步到服务器（插件 → 隧道，语音条 → 8898 专线，一次改完）
 powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root@<你的服务器IP>
 ```
 
-细节、自检、常见报错见 **[docs/QUICKSTART.md](docs/QUICKSTART.md)**（三步）。
+**可选  画图**（本机 Qwen-Image-2.1-Turbo，RTX 3080 上 1024² 约 25 秒/张）：
+
+```powershell
+# 先下权重（约 21 GB，下载地址表见 draw-model/README.md），再起服务：
+powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1
+```
+
+控制台 → **图片生成** → 服务地址填 `https://<你的公网入口>/v1`、模型随便填、API Key 填网关令牌。
+已经在用 `start-all.ps1` 的话，只要权重在位，这一步的「起服务」它会自动做。
+
+细节、自检、常见报错见 **[docs/QUICKSTART.md](docs/QUICKSTART.md)**（三步 + 可选的画图一步）。
 
 
-五步，详细命令在 **[docs/INSTALL.md](docs/INSTALL.md)**：
+不想用一键脚本的话，手动六步（详细命令都在 **[docs/INSTALL.md](docs/INSTALL.md)**）：
 
-1. **电脑端**：Python 3.11 环境 + RVC 资产（hubert/rmvpe/分离模型）+ 你的 `.pth` 音色 — [1](docs/INSTALL.md)
-2. **电脑端**：`gateway/config.json` 填令牌、音色、换声命令 — [2](docs/INSTALL.md)
-3. **电脑端**：起网关 `start-gateway.bat`，起隧道 `start-tunnel.bat` — [3](docs/INSTALL.md)
-4. **服务器端**：`plugin/sing` 放进 `data/plugins/`，控制台启用并填网关地址 + 令牌 — [4](docs/INSTALL.md)
-5. **语音条通道**：宿主 TTS 指向 `<网关地址>/v1` — [5](docs/INSTALL.md)
+| # | 做什么 | 章节 |
+|---|---|---|
+| 1 | 电脑端：Python 3.11 环境 + RVC 资产（hubert/rmvpe/分离模型）+ 你的 `.pth` 音色 | [1.1-1.3](docs/INSTALL.md) |
+| 2 | 电脑端：`gateway/config.json` 填令牌、音色、换声命令 | [1.4](docs/INSTALL.md) |
+| 3 | 电脑端：起网关、暴露成 https（隧道或 8898 专线） | [1.5-1.6](docs/INSTALL.md) |
+| 4 | 服务器端：`plugin/sing` 放进 `data/plugins/`，控制台启用并填网关地址 + 令牌 | [1.7-1.8](docs/INSTALL.md) |
+| 5 | 语音条通道：宿主 TTS 指向 `https://<服务器IP>:8898/v1` | [1.9](docs/INSTALL.md) |
+| 6 | **画图（可选）**：下 21 GB 权重 → 起 `draw-model\start-draw.ps1` → 控制台填地址 | [1.11](docs/INSTALL.md) |
 
 跑通后群里直接用：
 
 ```
 用语音唱一首夜曲      # 语音条（默认只走这条）
 点歌唱一首夜曲        # 群文件（要先打开「允许发群文件」）
+画一张 蓝色长发的小鲸鱼娘   # 本机出图（要先装 1.11 的画图）
 网易云怎么登录        # 想唱 VIP 曲原唱：控制台插件页点「扫码登录」扫一下
 ```
 
@@ -126,34 +134,15 @@ RTX 3080 10G / Windows / v1.0.5：
 | 默认音色 `defaultVoice` | 空 | 网关配置里的音色名；空=用网关默认 |
 | 允许发群文件 `allowFileOutput` | **关** | 关着只用语音条；开启后模型才可能用群文件发 mp3 |
 | 语音条唱多久 `voiceSeconds` | **0 = 整首** | 也可填 5-600 秒；改完自动推给网关，重启也保留 |
-| 群文件唱多久 `maxSeconds` | 60 | 秒（上限 600）；仅「允许发群文件」打开时生效 |
+| 群文件唱多久 `maxSeconds` | 60 | 秒（**上限 280**，受插件工具 300 秒超时限制）；仅「允许发群文件」打开时生效 |
 
 网关侧配置（`gateway/config.json`）见 [docs/INSTALL.md](docs/INSTALL.md) 与 [docs/TUNING.md](docs/TUNING.md)。
 
 ## 说话（TTS）
 
-宿主的 `send_voice` 指向本网关后，机器人"说话"也会打到这里：非点歌文本交给 `say` 引擎读出来。
-
-两种跑法，改一行配置就能切：
-
-默认 `say.engine = "auto"`：**云端优先**（快、音色绝对稳定），云端不可用时自动回落本机（免费、离线）。
-
-| | 云端（auto 的首选） | 本地（auto 的兜底） |
-|---|---|---|
-| 一句耗时 | **3-6 秒** | 10-15 秒（eager） |
-| 显存 | 0 | 8.2 GB，**说话时才加载、闲置 1 分钟自动退出** |
-| 音色 | 50 个预置，插件里选 | 参考音频克隆，或一句文字描述设计 |
-| 成本 | 按字符扣额度 | 免费 |
-
-云端：API Key 与音色在**插件设置**里填（「说话（Breeze 云端）」分组），插件页会显示后端在线与余额。
-填上 Breeze 账号邮箱密码（「云端额度」分组）后，插件会**每小时自动领一次每日 400 额度**，不用再去控制台点。
-本地：权重 7.2 GB 放 `say-model/weights/breeze-tts-2/`，环境见 **[docs/ENV.md](docs/ENV.md)**。
-
-**情绪**：模型在台词前写 `【生气】`/`【撒娇】`/`【温柔】`…，网关就按预设换语气（标记不会念出来），
-音色仍是同一个 voice_id —— 实测音色相似度 0.986-0.990，语速差 1.6 字/秒、响度差 5 dB。
-原理、三条铁律（别写性别/必须 speaker boost/别传 guidance）与自建预设见 **[docs/SPEAK.md](docs/SPEAK.md#情绪按情境换语气2026-11-02-上线)**。
-
-音色列表、计费、本地部署、排错全部见 **[docs/SPEAK.md](docs/SPEAK.md)**。
+机器人平时"说话"也走本网关（`say.engine = "auto"`：云端优先、本地兜底）。
+两种跑法的耗时、显存、音色、成本对照，以及插件里怎么配、情绪标记怎么用 —— 全部见
+**[docs/SPEAK.md](docs/SPEAK.md)**。
 
 ## 已知限制
 
@@ -173,13 +162,12 @@ RTX 3080 10G / Windows / v1.0.5：
 | [docs/INSTALL.md](docs/INSTALL.md) | 完整安装：RVC 资产、网关配置、隧道、服务器、容器桥接、网易云登录 |
 | [docs/TUNNEL.md](docs/TUNNEL.md) | 把本机网关暴露成 https：Cloudflare 快速隧道（推荐）/ ssh -R 专线（可选） |
 | [docs/SPEAK.md](docs/SPEAK.md) | 说话：云端 Breeze / 本地权重、音色描述与参考克隆、音高归一、插件配置、排错 |
-| [docs/ENV.md](docs/ENV.md) | 运行环境：一套 conda 环境同时跑说话+唱歌（torch cu128 / triton / RVC 依赖） |
+| [docs/ENV.md](docs/ENV.md) | 运行环境：`say-sing` 一个环境跑说话+唱歌，画图单独 venv |
 | [docs/TUNING.md](docs/TUNING.md) | 唱歌时长四道闸、常驻换声、显存、历史踩坑、验收清单 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 运行期报错：说话没声音、宿主 524、文件 ENOENT、只有原声没换声、超时 |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | 插件 ↔ 网关 HTTP 契约（想用别的语言重写后端看这个） |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 本地跑测试、代码结构 |
-| [CHANGELOG.md](CHANGELOG.md) | 每个版本做了什么（Release 正文就从这里抽） |
-| [docs/DRAW.md](docs/DRAW.md) | 本地画图：方案、显存账、接入步骤（接入中） |
+| [docs/DRAW.md](docs/DRAW.md) | 本地画图：实测数据、显存账、踩坑、接入步骤 |
 
 ## License
 

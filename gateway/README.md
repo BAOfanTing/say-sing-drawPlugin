@@ -38,6 +38,9 @@ curl -s http://127.0.0.1:8899/health # 自检
 | `say.splitSentences` / `maxSegmentChars` | 长文本按句切开分别合成再拼回（默认 **false**）：切句会把一次生成拆成多次，音色会变 |
 | `say.pitchTarget` / `pitchMaxShift` | 音高归一：把每句基频拉到目标 Hz（0 = 关），最大改动半音数（默认 3；本地偶有飘 3+ 半音，建议 6） |
 | `say.breezeKey` / `voiceId` | 云端 API Key 与音色 id（插件里填会推上来并落盘） |
+| `draw.url` | 本地出图服务地址（默认 `http://127.0.0.1:7880`）；网关透传 `/v1/images/generations` 给它 |
+| `draw.token` | 出图服务的 Bearer 令牌（留空 = 不校验；与网关令牌无关） |
+| `draw.timeoutMs` | 出图超时（默认 600000 = 10 分钟；首次要加载 13 GB 权重） |
 | `transcode` | `auto`（有 ffmpeg 就转 mp3 并裁到 maxSeconds）或 `never`（原样发） |
 | `maxSeconds` | 成品最长秒数上限（5-600），插件传来的值会被它夹住 |
 | `filesTtlHours` | 成品保留小时数（默认 24，到期自动删） |
@@ -94,7 +97,7 @@ python infer_cli.py -i {input} -o {output} -m me.pth -p {pitch}
 |---|---|---|
 | 30（试听一下效果） | 10-30 秒 | 只想快速看效果 |
 | 60-90 | 30-90 秒 | 需要准确卡点，插件超时留了余量 |
-| 180+ | 约 70 秒（自动分段） | 分段换声后不再撞超时 |
+| 180+ | 约 20 秒（自动分段，换声常驻时） | 分段换声后不再撞超时 |
 | 整首 4 分钟 | 约 22 秒（换声常驻时；冷启动多十几秒） | 切成 8 段（每段 30 秒），模型只加载一次 |
 | 说话（云端 Breeze） | 3-6 秒/句 | 非点歌文本走 `say` 引擎，云端不占显存 |
 | 说话（本机 Breeze） | 11-16 秒/句；闲置后首句约 35 秒（要重新加载） | 8.2 GB 显存，闲置 1 分钟自动退出 |
@@ -103,7 +106,7 @@ CPU 也能跑，但通常是实时的 3-10 倍慢，只适合离线批量。
 
 ## 自己实现后端？
 
-契约只有四个接口，见 [../docs/PROTOCOL.md](../docs/PROTOCOL.md)。用 Python/Go 写都行，
+契约见 [../docs/PROTOCOL.md](../docs/PROTOCOL.md)（唱歌/说话/画图三条链路 + 管理面，一共十来组）。用 Python/Go 写都行，
 只要形状对得上（`/health`、`/search`、`/sing`、`/jobs/:id`、`/files/:name`）。
 
 ## 测试

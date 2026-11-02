@@ -1,7 +1,7 @@
 # 开发与测试
 
 ```bash
-node --test            # 41 个用例：插件纯函数 / 网关队列 / 网关路由 / 真协议集成
+node --test            # 52 个用例（5 个文件）：插件纯函数 / 网关队列 / 网关路由 / 情绪预设 / 真协议集成
 node gateway/server.mjs
 
 # 宿主侧的验证工具（在 qq-agent-plus 仓库里跑）
@@ -9,7 +9,7 @@ node scripts/plugin-validate.mjs <本仓库>/plugin/sing
 node scripts/plugin-dev.mjs <本仓库>/plugin/sing --call sing_status
 ```
 
-契约见 [PROTOCOL.md](PROTOCOL.md)；想换后端（Python/Go 都行）只需实现同样的五个接口。
+契约见 [PROTOCOL.md](PROTOCOL.md)；想换后端（Python/Go 都行）要实现同一套接口 —— 注意别漏 `/say/*`、`/admin/*`、`/login/*`，漏了插件那几块功能会静默失效。
 
 ## 发布
 
@@ -53,9 +53,9 @@ node /path/to/qq-agent-plus/scripts/plugin-publish.mjs plugin/sing \
 
 ## 发版
 
-1. 在 `CHANGELOG.md` 顶部加一节 `## [x.y.z] - 日期`（**标题格式别改**，发布工作流按它抽取正文）
+1. 提交信息写规范点（`feat:` / `fix:` 开头）——发布正文按提交历史自动分组生成
 2. 同步版本号：`package.json`、`plugin/sing/plugin.json`、`gateway/lib/app.mjs` 的 `VERSION`
 3. `git tag vx.y.z && git push origin main --tags` —— 工作流会跑测试、用宿主的打包器真装一遍、
-   建 Release（正文 = CHANGELOG 该节 + 安装说明 + compare 链接）、挂上 `.tar.gz` 与 `index-entry.json`
+   建 Release（正文 = 提交列表 + 安装说明 + compare 链接）、挂上 `.tar.gz` 与 `index-entry.json`
 
 > 想先看正文长什么样：`node scripts/release-notes.mjs x.y.z --sha256 <hex>`

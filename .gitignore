@@ -61,3 +61,14 @@ say-model/*.crdownload
 
 # 语气 A/B 测试临时产物（音频、脚本、补丁）
 test/tmp-tone-ab/
+
+# 画图：权重/输出/日志/venv 都不进仓库（代码在 draw-model/ 根下，和 say-model 一个套路）
+draw-model/weights/**
+!draw-model/weights/**/
+!draw-model/weights/**/.gitkeep
+draw-model/outputs/
+draw-model/logs/
+draw-model/downloads/
+draw-model/.venv/
+draw-model/tmp/
+draw-model/*.crdownload

@@ -11,6 +11,7 @@
 //
 // 约定：跑完 output 必须存在且非空，否则算失败（不假装成功）。
 import fs from 'node:fs';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 
 const quote = (value) => `"${String(value).replace(/"/g, '\\"')}"`;
@@ -76,7 +77,14 @@ export function createVoiceEngine(config) {
 
     const ensure = () => {
       if (proc) return proc;
-      const child = spawn(serveCommand, { shell: true, windowsHide: true });
+      // ffmpeg 在 %TEMP% 里写不出文件（实测 Permission denied），把子进程的 TEMP 指到仓库内
+      const tmpForChild = path.join(config.dataDir || '.', 'tmp');
+      try { fs.mkdirSync(tmpForChild, { recursive: true }); } catch { /* 忽略 */ }
+      const child = spawn(serveCommand, {
+        shell: true,
+        windowsHide: true,
+        env: { ...process.env, TEMP: tmpForChild, TMP: tmpForChild }
+      });
       proc = child;
       child.stdout?.on('data', (chunk) => {
         buffer += chunk.toString('utf8');
@@ -163,6 +171,9 @@ export function createVoiceEngine(config) {
           windowsHide: true,
           env: {
             ...process.env,
+            // 同上：%TEMP% 不可写，指向仓库内的 tmp
+            TEMP: (() => { const d = path.join(config.dataDir || '.', 'tmp'); try { fs.mkdirSync(d, { recursive: true }); } catch { /* 忽略 */ } return d; })(),
+            TMP: (() => { const d = path.join(config.dataDir || '.', 'tmp'); try { fs.mkdirSync(d, { recursive: true }); } catch { /* 忽略 */ } return d; })(),
             SING_INPUT: values.input,
             SING_OUTPUT: values.output,
             SING_PITCH: values.pitch,
