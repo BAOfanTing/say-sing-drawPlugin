@@ -1,20 +1,28 @@
 <p align="center">
-  <img src="assets/icon.png" width="120" height="120" alt="qq-agent-plus-singPlugin">
+  <img src="assets/icon.png" width="120" height="120" alt="say-sing-drawPlugin">
 </p>
 
-<h1 align="center">qq-agent-plus-singPlugin</h1>
+<h1 align="center">say-sing-drawPlugin</h1>
 
 <p align="center">
-  <a href="https://github.com/BAOfanTing/qq-agent-plus-singPlugin/actions/workflows/ci.yml"><img src="https://github.com/BAOfanTing/qq-agent-plus-singPlugin/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
-  <a href="https://github.com/BAOfanTing/qq-agent-plus-singPlugin/releases"><img src="https://github.com/BAOfanTing/qq-agent-plus-singPlugin/releases/badge.svg" alt="release"></a>
+  <a href="https://github.com/BAOfanTing/say-sing-drawPlugin/actions/workflows/ci.yml"><img src="https://github.com/BAOfanTing/say-sing-drawPlugin/actions/workflows/ci.yml/badge.svg" alt="ci"></a>
+  <a href="https://github.com/BAOfanTing/say-sing-drawPlugin/releases"><img src="https://github.com/BAOfanTing/say-sing-drawPlugin/releases/badge.svg" alt="release"></a>
   <img src="https://img.shields.io/badge/node-%E9%9B%B6%E4%BE%9D%E8%B5%96-brightgreen" alt="zero-dep">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT">
 </p>
 
-<p align="center"><em>点歌 · 换声 · 发语音条 —— 给 qq-agent-plus 的唱歌插件</em></p>
+<p align="center"><em>说话 · 点歌换声 · 本地画图 —— 给 qq-agent-plus 的多媒体插件</em></p>
 
-给 [qq-agent-plus](https://github.com/sakurawwwxh/qq-agent-plus) 的**点歌唱歌**插件：
-群里说「用语音唱一首 X」，机器人用你自己训练的音色翻唱，直接发 QQ 语音条。
+给 [qq-agent-plus](https://github.com/sakurawwwxh/qq-agent-plus) 的多媒体插件，一个仓库覆盖三条能力：
+
+| 能力 | 状态 | 说明 |
+|---|---|---|
+| **说话**（TTS） | ✅ 已上线 | 机器人用 Breeze TTS 2 说话：云端优先（3-6 秒/句），本地兜底（8.2 GB 显存，闲置自退） |
+| **唱歌**（换声） | ✅ 已上线 | 群里说「用语音唱一首 X」，用你自己训练的 RVC 音色翻唱，发 QQ 语音条 |
+| **画图**（本地扩散模型） | 🚧 接入中 | 本地跑 Qwen 图像模型，宿主直接走 OpenAI 兼容的 `/images/generations` —— 方案与前置条件见 [docs/DRAW.md](docs/DRAW.md) |
+
+> 插件 id 仍叫 `sing`（历史原因）：改 id 等于变成新插件，已装用户的设置、凭据、
+> 成品目录都会丢，所以仓库名扩了、id 不动。
 
 > ⚠️ **前提**：换声模型（RVC）和网关都跑在**你自己的电脑**上（本仓库的 `gateway/` 与 `sing-model/`）。
 > 服务器只做转发、不装模型；电脑没开时机器人只会提示「后端离线」。
@@ -52,6 +60,7 @@ QQ 群 ──► 宿主(服务器) ──► 插件 sing ───────�
 | **唱歌 · 语音条**（默认） | 「用语音唱一首 X」 | QQ 语音气泡 | 本机 RVC 换声；默认唱**整首**（实测 4:21 完整歌能收播），整首 3:54 常驻换声约 22 秒（冷启动端到端约 43 秒） |
 | **唱歌 · 群文件** | 「点歌唱一首 X」 | mp3 文件 | 同上，但要先在插件设置里打开「允许发群文件」；工具超时 300 秒 |
 | **说话** | 机器人自己想说话（任何非点歌内容） | QQ 语音气泡 | Breeze TTS 2：云端 3-6 秒/句，或本机 11-16 秒/句（8.2 GB 显存，闲置自退） |
+| **画图** | 🚧 接入中 | QQ 图片 | 本机扩散模型 → 网关暴露 OpenAI 兼容 `/images/generations` → 宿主控制台「图片生成」直连；不占插件通道（插件只能发群文件，私聊发图走宿主） |
 
 判定规则很简单：**文本里能认出点歌意图（`唱：歌名` / `点歌唱…` / 句中触发）就走换声，其余当说话。**
 说话失败会退回文字，不影响唱这条主链路。
@@ -166,6 +175,7 @@ RTX 3080 10G / Windows / v1.0.5：
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | 插件 ↔ 网关 HTTP 契约（想用别的语言重写后端看这个） |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 本地跑测试、代码结构 |
 | [CHANGELOG.md](CHANGELOG.md) | 每个版本做了什么（Release 正文就从这里抽） |
+| [docs/DRAW.md](docs/DRAW.md) | 本地画图：方案、显存账、接入步骤（接入中） |
 
 ## License
 

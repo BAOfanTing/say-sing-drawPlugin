@@ -80,7 +80,7 @@ cp -r plugin/sing "$DATA_DIR/plugins/sing"
 
 # 或者走宿主自己的打包 + 安装器（推荐）
 node <qq-agent-plus>/scripts/plugin-pack.mjs ./plugin/sing \
-  --base-url https://github.com/BAOfanTing/qq-agent-plus-singPlugin --tag v1.0.5
+  --base-url https://github.com/BAOfanTing/say-sing-drawPlugin --tag v1.0.5
 node <qq-agent-plus>/src/ops.js plugins install sing-1.0.5.tar.gz
 ```
 

@@ -35,7 +35,7 @@ git tag v1.2.3 && git push origin v1.2.3
 ```bash
 node /path/to/qq-agent-plus/scripts/plugin-pack.mjs plugin/sing \
   --out dist --author BAofanTing \
-  --homepage https://github.com/BAOfanTing/qq-agent-plus-singPlugin \
+  --homepage https://github.com/BAOfanTing/say-sing-drawPlugin \
   --tag v1.2.3 --min-version 0.9.10 --tags "点歌,唱歌,语音"
 ```
 
@@ -47,7 +47,7 @@ node /path/to/qq-agent-plus/scripts/plugin-pack.mjs plugin/sing \
 gh repo clone sakurawwwxh/qq-agent-plugins
 node /path/to/qq-agent-plus/scripts/plugin-publish.mjs plugin/sing \
   --index-repo ../qq-agent-plugins --author BAofanTing \
-  --homepage https://github.com/BAOfanTing/qq-agent-plus-singPlugin --tags 点歌,唱歌,语音
+  --homepage https://github.com/BAOfanTing/say-sing-drawPlugin --tags 点歌,唱歌,语音
 # 确认无误后加 --push，再按提示 gh release upload packages plugins/packages/sing-<版本>.tar.gz
 ```
 

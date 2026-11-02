@@ -3,9 +3,9 @@
   "apiVersion": 2,
   "name": "点歌唱歌",
   "version": "1.0.5",
-  "description": "点歌唱歌：群里说「用语音唱一首X」，机器人用你训练好的音色翻唱并发语音条。⚠️ 需要先在本机部署并运行 qq-agent-plus-singPlugin（含 RVC 换声模型与本地网关），这台服务器只做转发、不跑模型；本机没开时只会提示后端离线。",
+  "description": "点歌唱歌：群里说「用语音唱一首X」，机器人用你训练好的音色翻唱并发语音条。⚠️ 需要先在本机部署并运行 say-sing-drawPlugin（含 RVC 换声模型与本地网关），这台服务器只做转发、不跑模型；本机没开时只会提示后端离线。",
   "author": "BAofanTing",
-  "homepage": "https://github.com/BAOfanTing/qq-agent-plus-singPlugin",
+  "homepage": "https://github.com/BAOfanTing/say-sing-drawPlugin",
   "license": "MIT",
   "entry": "index.mjs",
   "capabilities": [

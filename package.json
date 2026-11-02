@@ -1,8 +1,8 @@
 {
-  "name": "qq-agent-plus-sing-plugin",
+  "name": "say-sing-draw-plugin",
   "version": "1.0.5",
   "private": true,
-  "description": "QQ Agent 的点歌唱歌插件 + 本机换声网关（插件是薄客户端，换声在你的电脑上跑）",
+  "description": "QQ Agent 的说话 / 点歌唱歌（含本地画图）插件 + 本机后端网关（插件是薄客户端，重活在你自己的电脑上跑）",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"
@@ -23,6 +23,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/BAOfanTing/qq-agent-plus-singPlugin.git"
+    "url": "https://github.com/BAOfanTing/say-sing-drawPlugin.git"
   }
 }

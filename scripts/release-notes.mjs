@@ -59,7 +59,7 @@ const install = [
 const parts = [body || `## v${version}\n\n（CHANGELOG.md 里没有 ${version} 这一节，请补上）`, '', install];
 if (previous && previous !== version) {
   const repo = `${process.env.GITHUB_SERVER_URL || 'https://github.com'}`
-    + `/${process.env.GITHUB_REPOSITORY || 'BAOfanTing/qq-agent-plus-singPlugin'}`;
+    + `/${process.env.GITHUB_REPOSITORY || 'BAOfanTing/say-sing-drawPlugin'}`;
   parts.push('', `**Full Changelog**: [v${previous}...v${version}](${repo}/compare/v${previous}...v${version})`);
 }
 process.stdout.write(parts.join('\n') + '\n');

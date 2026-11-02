@@ -5,6 +5,17 @@
 
 ---
 
+## [未发布]
+
+### 变更
+
+- **仓库改名**：`qq-agent-plus-singPlugin` → **`say-sing-drawPlugin`**（覆盖 说话 / 唱歌 / 画图 三条能力）。
+  插件 `id` 保持 `sing` —— 改 id 等于变成新插件，已装用户的设置、凭据、成品目录都会丢。
+- 新增 [docs/DRAW.md](docs/DRAW.md)：本地画图方案（宿主直连 OpenAI 兼容 `/images/generations`，
+  不给插件加工具）、10 GB 显存的账、GPU 仲裁设计。**代码接入中**，模型选型待定。
+
+---
+
 ## [1.0.5] - 2026-11-02
 
 ### 新增
