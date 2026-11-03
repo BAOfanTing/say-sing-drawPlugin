@@ -14,7 +14,7 @@
 
 | 位置 | 内容 |
 |---|---|
-| `draw-model/server.py` | 本地出图服务：OpenAI 兼容 `POST /v1/images/generations` + `GET /health`；**懒加载 + 闲置退出**（默认 180 秒）、**单请求串行**、可选 Bearer 鉴权 |
+| `draw-model/server.py` | 本地出图服务：OpenAI 兼容 `POST /v1/images/generations` + `GET /health`；**懒加载 + 闲置退出**（默认 180 秒）、**单请求串行**、可选 Bearer 鉴权；退出后由网关按需拉起 |
 | `draw-model/start-draw.ps1` | 一键启动（自动挑 venv、检查权重缺哪些、强制 HF 离线） |
 | `draw-model/README.md` | 权重清单 + 下载命令 + 环境安装 + 接进宿主的四步 |
 | `gateway` 的 `/v1/images/generations` | 透传到 `draw.url`；**先让本地 TTS 让出显存**，唱歌在跑就排队（5 分钟上限），复用网关令牌 |
@@ -84,7 +84,8 @@ Qwen-Image 是 20B 的 MMDiT，不同精度的量级：
 
 1. 收到画图请求先 `yieldLocalSay()` —— 把本地 TTS（8.2 GB）收掉，显存让出来；
 2. 若 `activeSingJobs > 0`（唱歌在跑）就每秒轮询等它结束（最多 5 分钟）；
-3. 再透传给 `draw.url`；出图服务自己「懒加载 + 闲置 180 秒卸载」。
+3. 再透传给 `draw.url`；出图服务自己「懒加载 + 闲置退出」。**闲置退出后由网关按
+   `draw.startCommand` 自动拉起**（不需要额外的看门狗进程，第一次画图会慢十几秒）。
 
 实测效果：画图期间峰值 7.24 GB，出完回落到约 1.5 GB，能和唱歌/说话交替使用。
 

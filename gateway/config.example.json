@@ -65,6 +65,8 @@
   "draw": {
     "url": "http://127.0.0.1:7880",
     "token": "",
-    "timeoutMs": 600000
+    "timeoutMs": 600000,
+    "startCommand": "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File \"<仓库路径>/draw-model/start-draw.ps1\" -IdleSeconds 300",
+    "startTimeoutMs": 180000
   }
 }

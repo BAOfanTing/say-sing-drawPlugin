@@ -41,6 +41,8 @@ curl -s http://127.0.0.1:8899/health # 自检
 | `draw.url` | 本地出图服务地址（默认 `http://127.0.0.1:7880`）；网关透传 `/v1/images/generations` 给它 |
 | `draw.token` | 出图服务的 Bearer 令牌（留空 = 不校验；与网关令牌无关） |
 | `draw.timeoutMs` | 出图超时（默认 600000 = 10 分钟；首次要加载 13 GB 权重） |
+| `draw.startCommand` | 出图服务没在跑时网关自己拉起的命令（留空 = 只报 502） |
+| `draw.startTimeoutMs` | 等出图服务就绪的上限（默认 180000 = 3 分钟） |
 | `transcode` | `auto`（有 ffmpeg 就转 mp3 并裁到 maxSeconds）或 `never`（原样发） |
 | `maxSeconds` | 成品最长秒数上限（5-600），插件传来的值会被它夹住 |
 | `filesTtlHours` | 成品保留小时数（默认 24，到期自动删） |

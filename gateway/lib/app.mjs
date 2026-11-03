@@ -686,6 +686,65 @@ export function createApp({
    * 剥掉标记 → 该条换「表演指令」+ 开 use_speaker_boost → 合成后套 ffmpeg 加工。
    * 没有情绪时走的是原路径，一个字节都不变（向后兼容）。
    */
+
+  // 出图服务是"懒加载 + 闲置 300 秒退出"的：闲置后进程会没，下一次请求必须有人把它拉起来。
+  // 以前靠一个每 5 分钟跑一次的看门狗兜，副作用是**每分钟级别的窗口闪一下**，还在跟闲置退出互相打架。
+  // 现在改成按需拉起：连不上就先起进程，等 /health 通了再转发。
+  let drawStarting = null;
+  async function drawHealthy(timeoutMs = 2500) {
+    if (!config.draw?.url) return false;
+    try {
+      const r = await fetch(`${String(config.draw.url).replace(/\/$/, '')}/health`, {
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }
+  async function ensureDrawUp({ force = false } = {}) {
+    if (!force && await drawHealthy()) return true;
+    const command = String(config.draw?.startCommand || '').trim();
+    if (!command) {
+      console.warn('[draw] 后端没起，且没配 draw.startCommand —— 只能靠你自己手动启动');
+      return false;
+    }
+    if (drawStarting) return drawStarting;
+    drawStarting = (async () => {
+      try {
+        console.log('[draw] 后端没起，按需启动…');
+        const child = spawn(command, {
+          shell: true,
+          windowsHide: true,
+          detached: true,
+          stdio: 'ignore',
+          env: {
+            ...process.env,
+            TEMP: path.join(config.dataDir || '.', 'tmp'),
+            TMP: path.join(config.dataDir || '.', 'tmp')
+          }
+        });
+        child.unref();
+        const deadline = Date.now() + (Number(config.draw?.startTimeoutMs) || 180000);
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
+          if (await drawHealthy(1500)) {
+            console.log('[draw] ✓ 后端已就绪');
+            return true;
+          }
+        }
+        console.warn('[draw] ✗ 启动超时（看 draw-model/logs/draw-service.err.log）');
+        return false;
+      } catch (error) {
+        console.warn(`[draw] ✗ 启动失败：${String(error?.message ?? error).slice(0, 120)}`);
+        return false;
+      } finally {
+        drawStarting = null;
+      }
+    })();
+    return drawStarting;
+  }
+
   async function handleSay(req, res, text, options = {}) {
     const startedAt = Date.now();
     const emotionTable = config.say.emotions || {};
@@ -820,32 +879,59 @@ export function createApp({
     // 宿主控制台的「图片生成 → 服务地址」可以直接指向本网关，也可以指向 draw 服务本身；
     // 走网关的好处是能拿到统一的 GPU 仲裁（唱歌/说话在跑时排队），并复用网关令牌。
     if ((pathname === '/v1/images/generations' || pathname === '/images/generations') && req.method === 'POST') {
-      if (!config.draw?.url) {
-        throw Object.assign(new Error('画图后端没配置（draw.url），见 docs/DRAW.md'), { code: 'E_DRAW_OFF' });
+      // 出图服务可能没起、可能卡在共享内存里、也可能把连接直接掐了。
+      // 这些都必须在这条路由里就地变成 502 —— 之前没兜住：fetch 抛错变成未捕获拒绝，
+      // **整个网关进程跟着退出**（宿主看到的就是"画图没反应"，连唱歌/说话一起哑掉）。
+      try {
+        if (!config.draw?.url) {
+          throw Object.assign(new Error('画图后端没配置（draw.url），见 docs/DRAW.md'), { code: 'E_DRAW_OFF' });
+        }
+        // ① 先把本地 TTS 的显存让出来（它 8 GB，和画图不可能共存）
+        await yieldLocalSay();
+        // ② 唱歌在跑就排队等它结束（串行队列最多 1 个）
+        const waitedFrom = Date.now();
+        while (activeSingJobs > 0 && Date.now() - waitedFrom < 5 * 60 * 1000) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+        const raw = await readRawBody(req);
+        const headers = { 'content-type': 'application/json' };
+        if (config.draw.token) headers.authorization = `Bearer ${config.draw.token}`;
+        const target = `${String(config.draw.url).replace(/\/$/, '')}/v1/images/generations`;
+        // ③ 出图服务是"闲置就退出"的（省显存），所以第一次请求大概率连不上 —— 自己拉起来再试。
+        await ensureDrawUp();
+        let response;
+        try {
+          response = await fetch(target, {
+            method: 'POST', headers, body: raw,
+            signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
+          });
+        } catch (error) {
+          // 拉起来之后又被掐断（比如刚启动就 OOM）→ 再试一次，仍失败就交给外层报 502
+          console.warn(`[draw] 首次转发失败（${String(error?.message ?? error).slice(0, 80)}），重试一次`);
+          await ensureDrawUp({ force: true });
+          response = await fetch(target, {
+            method: 'POST', headers, body: raw,
+            signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
+          });
+        }
+        const text = await response.text();
+        console.log(`[draw] → ${target} ${response.status}`);
+        res.writeHead(response.status, {
+          'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(text)
+        });
+        res.end(text);
+        return;
+      } catch (error) {
+        const message = `画图后端不可用：${String(error?.message ?? error).slice(0, 200)}`;
+        console.error(`[draw] ✗ ${message}`);
+        if (res.headersSent || res.writableEnded) {
+          res.destroy();
+        } else {
+          sendJson(res, 502, { error: { message } });
+        }
+        return;
       }
-      // ① 先把本地 TTS 的显存让出来（它 8 GB，和画图不可能共存）
-      await yieldLocalSay();
-      // ② 唱歌在跑就排队等它结束（串行队列最多 1 个）
-      const waitedFrom = Date.now();
-      while (activeSingJobs > 0 && Date.now() - waitedFrom < 5 * 60 * 1000) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
-      const raw = await readRawBody(req);
-      const headers = { 'content-type': 'application/json' };
-      if (config.draw.token) headers.authorization = `Bearer ${config.draw.token}`;
-      const target = `${String(config.draw.url).replace(/\/$/, '')}/v1/images/generations`;
-      const response = await fetch(target, {
-        method: 'POST', headers, body: raw,
-        signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
-      });
-      const text = await response.text();
-      console.log(`[draw] → ${target} ${response.status}`);
-      res.writeHead(response.status, {
-        'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
-        'content-length': Buffer.byteLength(text)
-      });
-      res.end(text);
-      return;
     }
 
     if (pathname === '/health') {

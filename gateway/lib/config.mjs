@@ -11,7 +11,8 @@ export const DEFAULT_CONFIG = Object.freeze({
   source: { type: 'netease', localDir: '', neteaseCookie: '', limit: 5 },
   // 画图：本地出图服务（draw/ 里的 Python 服务，OpenAI 兼容 /v1/images/generations）。
   // 网关只做透传 + GPU 仲裁，模型跑在 draw/ 那个进程里。
-  draw: { url: 'http://127.0.0.1:7880', token: '', timeoutMs: 600000 },
+  draw: { url: 'http://127.0.0.1:7880', token: '', timeoutMs: 600000,
+    startCommand: '', startTimeoutMs: 180000 },
   // 换声：none（直出原音，用于先跑通链路）| command（调你自己的 RVC/SVC 命令行）
   // 说话（TTS）：非点歌的文本走这里，只走 Breeze 云端
   say: {
@@ -140,7 +141,10 @@ export function normalizeConfig(raw, { rootDir = process.cwd() } = {}) {
     draw: {
       url: asString(drawInput.url) || DEFAULT_CONFIG.draw.url,
       token: asString(drawInput.token),
-      timeoutMs: asInt(drawInput.timeoutMs, DEFAULT_CONFIG.draw.timeoutMs, 1000, 3600000)
+      timeoutMs: asInt(drawInput.timeoutMs, DEFAULT_CONFIG.draw.timeoutMs, 1000, 3600000),
+      // 出图服务闲置会退出，网关按需把它拉起来（留空 = 只报 502，不自动启动）
+      startCommand: asString(drawInput.startCommand),
+      startTimeoutMs: asInt(drawInput.startTimeoutMs, DEFAULT_CONFIG.draw.startTimeoutMs, 10000, 600000)
     },
     // 意图识别：bareTitle=true 时，短且不带标点/空格的中文会被当成歌名。
     // 默认关：宿主 send_voice 也走这条通道，模型的口头禅（「好的」「收到」）会被当成歌名去唱歌。

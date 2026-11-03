@@ -140,6 +140,68 @@ curl.exe -X POST http://127.0.0.1:8899/v1/images/generations `
   -d '{"prompt":"一只橘猫坐在窗台","size":"1024x1024"}'
 ```
 
+## 角色一致性（图生图）：说「画大肥鱼」就自动带参考图
+
+角色固定在 `refs/` 里（现在只有一张全身 Q 版 `dfy-fullbody.png`，见 [refs/README.md](refs/README.md)）。
+**prompt 命中触发词**（默认 `大肥鱼 / 鲸鱼娘 / 鲸鱼妹妹 / 小鲸鱼 / 蓝色鲸鱼 / deepseek娘 / 画自己 …`）
+就走图生图，否则还是原来的纯文生图 —— 调用方（宿主/网关）一行都不用改，宿主那条链路本来就只发 prompt：
+
+```powershell
+# 命中触发词 → 图生图，宽高按参考图比例自动算
+curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
+  -H 'content-type: application/json' `
+  -d '{"prompt":"蓝色大肥鱼 站在海边礁石上看夕阳"}'
+
+# 宽高分开给（这次要竖图）
+curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
+  -H 'content-type: application/json' `
+  -d '{"prompt":"蓝色大肥鱼 在咖啡厅喝奶茶","size":"768x1024"}'
+
+# 指定参考图 / 强制文生图
+curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
+  -H 'content-type: application/json' `
+  -d '{"prompt":"蓝色大肥鱼 在看书","ref":"dfy-fullbody.png"}'
+curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
+  -H 'content-type: application/json' `
+  -d '{"prompt":"蓝色大肥鱼 在看书","ref":"none"}'
+```
+
+细节：
+
+- **角色描述前缀**由 `DRAW_CHAR_TEMPLATE` 拼在 prompt 前面（发色、女仆装、围裙刺绣、鳍状耳、鲸鱼尾）：
+  参考图负责“长得像”，模板负责“每次都不跑偏”；
+- 参考图以 `image=[PIL]` 传给管线（Qwen3-VL 视觉槽 + VAE latent 前缀），**没有 strength 旋钮**，
+  构图会很贴近参考图 —— 想换姿势/换景就在 prompt 里把差异写清楚，或换一张构图接近的参考图；
+- `size` 给 "1024" 或 "1024x1024" 时按参考图比例铺满 `size²` 的面积，不会被压成方图；
+- `ref` 只认 `refs/` 目录里的 png/jpg/webp，做了 basename + 目录边界检查（防 `../` 穿越）。
+
+### 实测（RTX 3080 10 GB，8 步）
+
+| 场景 | 分辨率 | 耗时 |
+|---|---|---|
+| 文生图 | 1024² | 20-25 s（老路径，没变） |
+| 图生图 | 1056×992（按参考图比例） | **71 s** |
+| 图生图 | 768×1024（竖图） | **101 s** |
+| 图生图（显存被别的程序占着） | 768×1024 | **805 s** ← 掉进 Windows 共享内存 |
+
+> 图生图比文生图多吃一块：视觉塔激活 + 条件图的 VAE latent。**浏览器/编辑器/游戏占着显存时，
+> 峰值会翻过 10 GB 掉进共享内存**（同一张图 805 s vs 71 s）。跑图前把吃显存的程序关掉，
+> 或把 `DRAW_REF_MAX_SIDE` 调小（默认 1024，视觉 token 随之减少）。
+
+### 踩坑：一加参考图就报 `FP4 quantization state not initialized`
+
+纯文生图正常，一带 `image=` 就崩在 Qwen3-VL 的视觉 merger 上，最终是 bitsandbytes
+`fix_4bit_weight_quant_state_from_module` 里的 `assert module.weight.shape[1] == 1` 失败。
+
+真因：**`model.visual.merger` 和 3 个 `deepstack_merger_list.*` 下的 8 个 `linear_fc1/fc2`
+用 4bit 加载后其实没被量化**（权重还是 bf16 的 `(out, in)`、`quant_state` 为 `None`），
+但类名已经是 `Linear4bit`。文生图不碰视觉塔所以一直没暴露。
+修法在 `server.py` 的 `_fix_unquantized_4bit()`：加载后把这 8 层换回 bf16 的 `nn.Linear`
+（合计约 170M 参数、0.34 GB，几乎不亏）。
+
+> 顺手排除的两个“看起来像元凶”的：**不是** accelerate 的 `model_cpu_offload`（关掉钩子照样炸），
+> 也**不是** `llm_int8_skip_modules=["visual"]` 能解决的（这个版本的 transformers 不按它跳过）。
+
 ## 接进宿主（机器人真的会画图）
 
 控制台 → **图片生成**：
@@ -162,10 +224,41 @@ curl.exe -X POST http://127.0.0.1:8899/v1/images/generations `
 | `DRAW_SIZE` | 1024 | 默认边长（请求里 `size` 可覆盖） |
 | `DRAW_STEPS` | 空 | 留空用 Turbo 官方的 `sample_sigmas`（8 个断点）；填数字则覆盖 |
 | `DRAW_WEIGHTS` | `<仓库>/draw-model/weights` | 权重目录 |
+| `DRAW_REFS` | `<本目录>/refs` | 角色参考图目录（只认这里的 png/jpg/webp） |
+| `DRAW_IMG2IMG` | 1 | 0 = 关掉触发词图生图，全部走文生图 |
+| `DRAW_TRIGGERS` | `大肥鱼,鲸鱼娘,鲸鱼妹妹,小鲸鱼,蓝色鲸鱼,deepseek娘,画自己,画个自己,画一只自己` | 命中任一即走图生图 |
+| `DRAW_REF` | 空 | 固定用哪张参考图；留空按 `refs/default.txt`，再退到目录里第一张 |
+| `DRAW_REF_MAX_SIDE` | 768 | 参考图送进视觉塔前的最长边（调小省显存/更快） |
+| `DRAW_CHAR_TEMPLATE` | 内置那段 | 固定角色描述前缀，留空用内置 |
+| `DRAW_TE_ON_GPU` | 0 | 兜底开关：仍撞 FP4 报错时把文本编码器临时按到卡上（+约 5 GB 显存） |
+| `DRAW_REQUEST_TIMEOUT` | 300 | 单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限 |
+| `DRAW_LOG` | `<本目录>/logs/service.log` | 日志文件（用调度任务起的进程抓不到控制台输出） |
+
+## 出图卡死/网关崩溃时看这里（2026-11-03 事故复盘）
+
+现象：群里让它画图，**十几分钟没反应**，`/health` 连不上。
+
+1. **出图服务先被拖死**：显存被别的程序占着时，这张图掉进 Windows 共享内存，
+   一张要十几分钟，期间线程全被钉在推理里；
+2. **然后网关跟着崩**：`/v1/images/generations` 那段 `await fetch(draw)` 抛错后没人接住，
+   变成未捕获拒绝 → **整个 Node 进程退出**（`gateway.log` 里能看到 `网关退出（code=1）` + 连续重启），
+   宿主那边就完全没回应，唱歌/说话也一起哑掉。
+
+两条都已修：
+
+| 位置 | 改动 |
+|---|---|
+| `gateway/lib/app.mjs` | 画图路由整段包 try/catch → 出图服务挂了只回 **502 `画图后端不可用：…`**，网关不再跟着死（实测：停掉出图服务后 POST 回 502，`/health` 正常） |
+| `draw-model/server.py` | ① 推理放后台线程 + `DRAW_REQUEST_TIMEOUT`（默认 300s）超时回 **504**，HTTP 层不再被钉死；② 超时后标记 `tainted`，下次请求先卸载重载管线；③ 日志写 `logs/service.log`（带 traceback）；④ 参考图默认缩到 768 省显存 |
+
+排查顺序：`logs/service.log` → `gateway/gateway-run/gateway.log` → `nvidia-smi`
+（显存被占满时先关浏览器/编辑器/游戏，或把 `DRAW_REQUEST_TIMEOUT` 调大并接受更慢）。
 
 ## 已知限制
 
 - **单请求串行**：同一时刻只出一张（10 GB 卡不能并发）。
 - **首次出图慢**：要先把 13 GB 权重读进来并量化，实测取决于磁盘；之后每张按 8 步算。
+- **图生图更吃显存**：比文生图多 1-3 GB（视觉塔 + 条件图 latent），见上面实测表。
 - **和唱歌/说话互斥**：走网关时会自动排队并让出显存；直连 7880 不排队，自己注意别和唱歌同时跑。
-- 许可：模型继承 **Qwen Research License**，自用没问题，商用需自行确认。
+- 许可：模型继承 **Qwen Research License**，自用没问题，商用需自行确认；
+  `refs/` 里的参考图是民间二创/表情包，自用可以，公开发布请自行确认授权。

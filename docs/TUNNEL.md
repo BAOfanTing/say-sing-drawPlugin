@@ -154,33 +154,33 @@ nginx -t && systemctl reload nginx
 > 宿主的 `NODE_EXTRA_CA_CERTS=/opt/qq-agent/tls/ca.crt` 一直留着没坏处（只影响自签那几条链路）。
 > 证书链坏了（CA 重建过）就跑 `bash reissue-server-cert.sh`。
 
-## 看门狗：后端 502 / 掉线自愈
+## 后端 502 / 掉线怎么办
 
-宿主机看到 **502** 通常不是"电脑关了"，而是两种情况之一：
+宿主机看到 **502** 通常不是"电脑关了"，而是两种情况：
 
-| 现象 | 原因 | 看门狗怎么处理 |
+| 现象 | 原因 | 处理 |
 |---|---|---|
-| 502 但电脑在跑 | 隧道活着，**本地网关 8899 挂了** | 重启 `QQAgentSingGateway` 任务 |
-| 502 且电脑在跑 | **ssh 反向隧道断了** | 重启 `QQAgentSingTunnel` 任务 |
-| 画图报错 | 出图服务 7880 没起来 | 重启 `QQAgentDrawService` 任务 |
+| 502，电脑在跑 | 隧道活着，**本地网关 8899 挂了** | 重启 `QQAgentSingGateway` 任务 |
+| 502，电脑在跑 | **ssh 反向隧道断了** | 重启 `QQAgentSingTunnel` 任务 |
+| 画图报错但唱歌正常 | 出图服务闲置退出了 | **不用管**：网关会按需把它拉起来（见下） |
 
-一键注册（每 5 分钟检查一次，只在挂了时才动手）：
+### 出图服务：按需拉起，不需要看门狗
 
-```powershell
-schtasks /Create /TN "QQAgentWatchdog" /SC MINUTE /MO 5 /RL HIGHEST /F ^
-  /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File <仓库路径>\scripts\watchdog.ps1"
+出图服务是"懒加载 + 闲置 300 秒退出"的（省显存）。网关收到画图请求时如果连不上 7880，
+会用 `draw.startCommand` 自己把服务拉起来，等 `/health` 通了再转发 —— 第一次画图会慢十几秒。
+
+> 原来这里挂过一个每 5 分钟跑一次的看门狗（`QQAgentWatchdog`），结果是**任务栏每隔几分钟闪一下
+> 黑窗**，而且它跟"闲置退出"互相打架（把正常退出的服务当成挂了、反复重启）。
+> 现在默认**禁用**；要恢复就 `schtasks /Change /TN QQAgentWatchdog /ENABLE`。
+
+### 计划任务不要弹窗：用 wscript 启动器
+
+`powershell.exe -WindowStyle Hidden` 只能"起来后再藏"，中间那一下照样闪。仓库里给了两个
+GUI 子系统的启动器（本身没有控制台），计划任务直接调它们就不会有任何窗口：
+
 ```
-
-日志在 `logs/watchdog.log`，**只有发生重启时才写**，平时不会刷屏。
-
-> 画图那行（`QQAgentDrawService`）要先注册这个任务看门狗才会管；没注册它会自动跳过，
-> `start-all.ps1` 则会用隐藏进程临时拉起：
->
-> ```powershell
-> schtasks /Create /TN "QQAgentDrawService" /SC ONLOGON /RL HIGHEST /F ^
->   /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File <仓库路径>\draw-model\start-draw.ps1"
-> ```
-
-> 注意：手动 `schtasks /Run /TN QQAgentSingTunnel` 时如果隧道已经连着，会因为远端端口占用而
-> `ExitOnForwardFailure` 退出、5 秒后重连——中间会有十几秒 502。要重启就先确认没有 ssh 进程。
-
+wscript.exe //B <仓库>\scripts\run-hidden.vbs <仓库>\scripts\run-gateway-forever.ps1
+wscript.exe //B <仓库>\scripts\run-hidden.vbs <仓库>\scripts\run-tunnel-local.ps1 -SshHost root@<IP>
+wscript.exe //B <仓库>\scripts\run-hidden.vbs <仓库>\draw-model\start-draw.ps1 -IdleSeconds 300
+wscript.exe //B <仓库>\scripts\run-claim-hidden.vbs      # 每日额度领取（原来 cmd.exe 跑 node，会闪）
+```

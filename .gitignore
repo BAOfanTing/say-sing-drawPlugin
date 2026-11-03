@@ -75,3 +75,10 @@ draw-model/*.crdownload
 
 # 打包产物（发版工作流自己生成，不进仓库）
 dist/
+
+# 画图参考图的抓图中间产物（refs 里真正的 *.png 要提交）
+draw-model/refs/_raw*/
+draw-model/refs/_norm/
+draw-model/refs/_grid/
+draw-model/refs/_contact*
+draw-model/refs/_refs-check*

@@ -24,6 +24,21 @@
     DRAW_IDLE_SECONDS=180        闲置多少秒后卸载模型（0 = 常驻）
     DRAW_SIZE=1024               默认边长
     DRAW_STEPS=（留空则用 Turbo 的 sample_sigmas）
+
+角色一致性（图生图，见 refs/README.md）：
+    DRAW_REFS=<仓库>/draw-model/refs   参考图目录（只认这个目录里的 png/jpg，防目录穿越）
+    DRAW_IMG2IMG=1                     0 = 关掉触发词图生图，退回纯文生图
+    DRAW_TRIGGERS=大肥鱼,鲸鱼娘,…      命中任一即走图生图
+    DRAW_REF=                          固定用哪张参考图（留空 = 按 refs/default.txt 或目录里第一张）
+    DRAW_CHAR_TEMPLATE=…              固定角色描述前缀（留空用内置那段）
+
+请求体除 OpenAI 那几个字段外还认两个（供 curl 调试，宿主不会传）：
+    "ref": "dfy-fullbody.png"   指定参考图；"ref": "none" 强制文生图
+    "size": "768x1024"          宽高分开给（以前只取宽，正方形）
+
+健壮性：
+    DRAW_REQUEST_TIMEOUT=300    单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限
+    DRAW_LOG=<本目录>/logs/service.log   日志文件（调度任务起的进程抓不到控制台）
 """
 from __future__ import annotations
 
@@ -34,6 +49,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -51,6 +67,31 @@ WEIGHTS = os.environ.get("DRAW_WEIGHTS") or os.path.join(
 TURBO_CFG = os.path.join(WEIGHTS, "turbo-config")
 BASE_CFG = os.path.join(WEIGHTS, "base-config")
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+REFS = os.environ.get("DRAW_REFS") or os.path.join(_HERE, "refs")
+IMG2IMG = os.environ.get("DRAW_IMG2IMG", "1").strip() not in ("0", "false", "False", "")
+TRIGGERS = [
+    t.strip() for t in os.environ.get(
+        "DRAW_TRIGGERS",
+        "大肥鱼,鲸鱼娘,鲸鱼妹妹,小鲸鱼,蓝色鲸鱼,deepseek娘,画自己,画个自己,画一只自己",
+    ).split(",") if t.strip()
+]
+REF_OVERRIDE = os.environ.get("DRAW_REF", "").strip()
+# 单次请求最多等多久（秒）。超过就回 504 并把管线标记为"待卸载"：
+# 之前没有这道闸，一次掉进共享内存的渲染能把服务卡死十几分钟，健康检查都连不上。
+REQUEST_TIMEOUT = float(os.environ.get("DRAW_REQUEST_TIMEOUT", "300") or 0)
+LOG_PATH = os.environ.get("DRAW_LOG") or os.path.join(_HERE, "logs", "service.log")
+
+# 固定角色描述：参考图已经给了脸和服装，这段只补参考图裁掉/模糊掉的部分（尾巴、围裙刺绣、鳍耳）。
+CHAR_TEMPLATE = os.environ.get("DRAW_CHAR_TEMPLATE") or (
+    "蓝色大肥鱼的拟人化形象（DeepSeek 鲸鱼娘，角色设计与参考图完全一致）："
+    "深蓝色到浅蓝渐变的超长微卷发，蓝色大眼，白色蕾丝女仆头巾，"
+    "藏青色女仆连衣裙配白色荷叶边和白色围裙（围裙上有蓝色小鲸鱼刺绣），"
+    "水滴形的鳍状耳，身后一条蓝色鲸鱼尾巴，蓝白配色。"
+    "画风：Q 版动漫插画，赛璐璐上色，柔和打光。"
+    "场景："
+)
+
 _lock = threading.Lock()          # 串行化：同一时刻只跑一次推理
 _state = {
     "pipe": None,                 # 已加载的管线
@@ -59,12 +100,21 @@ _state = {
     "renders": 0,
     "last_error": "",
     "sigmas": None,
+    "tainted": False,             # 上一张超时/出错 → 下次请求先卸载重来
 }
 _idle_timer: threading.Timer | None = None
 
 
 def log(msg: str) -> None:
-    print(f"[draw] {msg}", flush=True)
+    """同时写控制台与 logs/service.log —— 用调度任务起的时候控制台是抓不到的。"""
+    line = f"[draw] {msg}"
+    print(line, flush=True)
+    try:
+        os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+        with open(LOG_PATH, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {line}\n")
+    except Exception:
+        pass
 
 
 # ── 管线加载 / 卸载 ────────────────────────────────────────
@@ -79,6 +129,44 @@ def _read_sigmas():
             except Exception:
                 pass
     return None
+
+
+def _fix_unquantized_4bit(root, label: str = "") -> list[str]:
+    """把「类名是 Linear4bit、权重却没真量化」的层换回普通 nn.Linear。
+
+    Qwen3-VL 的视觉 merger（`model.visual.merger` / `deepstack_merger_list.*` 那 8 个 linear_fc1/fc2）
+    在 bitsandbytes 4bit 加载后就是这个状态：weight 还是 bf16 的 (out, in)、`quant_state` 是 None。
+    纯文生图不碰视觉塔，所以一直没暴露；一旦带参考图进来，前向就会撞
+    `assert module.weight.shape[1] == 1`（bitsandbytes `fix_4bit_weight_quant_state_from_module`）。
+    它们加起来才 170M 参数（bf16 约 0.34 GB），直接换成 bf16 的 nn.Linear 最省事。
+    """
+    import torch
+    import torch.nn as nn
+    import bitsandbytes as bnb
+
+    fixed = []
+    for name, mod in list(root.named_modules()):
+        if not isinstance(mod, bnb.nn.Linear4bit):
+            continue
+        weight = mod.weight
+        quantized = weight.dim() == 2 and weight.shape[1] == 1 and getattr(weight, "quant_state", None) is not None
+        if quantized:
+            continue
+        parent_name, _, child = name.rpartition(".")
+        parent = root.get_submodule(parent_name) if parent_name else root
+        lin = nn.Linear(
+            mod.in_features, mod.out_features, bias=mod.bias is not None,
+            device=weight.device, dtype=weight.dtype,
+        )
+        with torch.no_grad():
+            lin.weight.copy_(weight)
+            if mod.bias is not None:
+                lin.bias.copy_(mod.bias)
+        setattr(parent, child, lin)
+        fixed.append(name)
+    if fixed:
+        log(f"{label}修正 {len(fixed)} 个未真正量化的 4bit 层（视觉 merger）")
+    return fixed
 
 
 def load_pipeline():
@@ -131,6 +219,7 @@ def load_pipeline():
     text_encoder = Qwen3VLForConditionalGeneration.from_pretrained(
         te_dir, quantization_config=bnb, torch_dtype=torch.bfloat16
     )
+    _fix_unquantized_4bit(text_encoder, "文本编码器：")
 
     processor_dir = os.path.join(TURBO_CFG, "processor")
     if not os.path.exists(processor_dir):
@@ -191,18 +280,135 @@ def _arm_idle_timer() -> None:
     _idle_timer.start()
 
 
+# ── 参考图（图生图） ──────────────────────────────────────
+_REF_EXT = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _list_refs() -> list[str]:
+    if not os.path.isdir(REFS):
+        return []
+    return sorted(
+        f for f in os.listdir(REFS)
+        if f.lower().endswith(_REF_EXT) and not f.startswith(("_", "."))
+    )
+
+
+def _default_ref() -> str:
+    """默认参考图：环境变量 > refs/default.txt 里写的 > 目录里第一张。"""
+    if REF_OVERRIDE:
+        return REF_OVERRIDE
+    marker = os.path.join(REFS, "default.txt")
+    if os.path.exists(marker):
+        try:
+            # utf-8-sig：Windows 上记事本/PowerShell 存的文件常带 BOM，带进文件名就永远匹配不上
+            with open(marker, encoding="utf-8-sig") as fh:
+                name = fh.read().strip()
+            if name:
+                return name
+        except Exception:
+            pass
+    files = _list_refs()
+    return files[0] if files else ""
+
+
+def _ref_path(name: str) -> str:
+    """把请求里的名字收敛成 refs/ 下的绝对路径；越界一律当没给。"""
+    if not name:
+        return ""
+    base = os.path.basename(str(name).strip().replace("\\", "/"))
+    if not base or base != str(name).strip().replace("\\", "/") or not base.lower().endswith(_REF_EXT):
+        return ""
+    path = os.path.join(REFS, base)
+    try:                                      # 真·目录边界检查（防 ../ 与符号链接）
+        if os.path.commonpath([os.path.abspath(path), os.path.abspath(REFS)]) != os.path.abspath(REFS):
+            return ""
+    except ValueError:
+        return ""
+    return path if os.path.isfile(path) else ""
+
+
+def _triggered(prompt: str) -> bool:
+    if not IMG2IMG:
+        return False
+    hay = prompt.replace(" ", "").lower()
+    return any(t.replace(" ", "").lower() in hay for t in TRIGGERS)
+
+
+def resolve_ref(prompt: str, requested: str | None) -> str:
+    """决定这次要不要带参考图，返回绝对路径（空字符串 = 文生图）。"""
+    asked = str(requested or "").strip()
+    if asked.lower() in ("none", "off", "0"):
+        return ""
+    if asked:
+        path = _ref_path(asked)
+        if path:
+            return path
+        log(f"⚠ 请求里的 ref={asked} 不在 refs/ 里，忽略")
+    if not _triggered(prompt):
+        return ""
+    path = _ref_path(_default_ref())
+    if not path:
+        log(f"⚠ 命中触发词但 refs/ 里没有可用参考图（{REFS}），退回文生图")
+    return path
+
+
+def load_ref_image(path: str):
+    """读参考图：转 RGB、限制长边（视觉编码器按图块算 token，太大只会更慢更占显存）。"""
+    from PIL import Image
+
+    img = Image.open(path)
+    img = img.convert("RGB")
+    limit = int(os.environ.get("DRAW_REF_MAX_SIDE", "768"))
+    if max(img.size) > limit:
+        scale = limit / max(img.size)
+        img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
+    return img
+
+
+def _dims(size: int, ref_img) -> tuple[int, int]:
+    """给出宽高：有参考图就按它的比例铺满 size² 的面积（否则参考图的比例会被压扁）。"""
+    if ref_img is None:
+        return size, size
+    ratio = ref_img.width / max(1, ref_img.height)
+    area = size * size
+    w = (area * ratio) ** 0.5
+    h = w / ratio
+    w = max(256, min(2048, int(round(w / 32)) * 32))
+    h = max(256, min(2048, int(round(h / 32)) * 32))
+    return w, h
+
+
 # ── 推理 ──────────────────────────────────────────────────
-def generate(prompt: str, size: int, steps, seed=None) -> bytes:
+def generate(prompt: str, size: int, steps, seed=None,
+             ref_name: str | None = None, dims: tuple[int, int] | None = None) -> bytes:
     import torch
 
     with _lock:
+        if _state["tainted"]:
+            # 上一次超时/出错：管线可能留在半截状态，先扔掉重来
+            unload_pipeline("上一张超时或出错")
+            _state["tainted"] = False
         if _state["pipe"] is None:
             _state["pipe"] = load_pipeline()
             _state["loaded_at"] = time.time()
         pipe = _state["pipe"]
         _state["last_used"] = time.time()
 
-        kwargs = dict(prompt=prompt, width=size, height=size, true_cfg_scale=1.0)
+        ref_path = resolve_ref(prompt, ref_name)
+        ref_img = load_ref_image(ref_path) if ref_path else None
+        width, height = dims or _dims(size, ref_img)
+
+        kwargs = dict(prompt=(CHAR_TEMPLATE + prompt) if ref_img is not None else prompt,
+                      width=width, height=height, true_cfg_scale=1.0)
+        te_pinned = False
+        if ref_img is not None:
+            # Qwen-Image-2.1 的条件图走 Qwen3-VL 视觉槽 + VAE latent 前缀，必须传 list
+            kwargs["image"] = [ref_img]
+            # 兜底开关：默认不开。真正修好视觉塔的是加载期的 `_fix_unquantized_4bit()`，
+            # 这条只是别的主机上还撞 FP4 报错时，把编码器临时按在卡上再用（多吃 ~5 GB 显存）。
+            if os.environ.get("DRAW_TE_ON_GPU", "0") == "1":
+                pipe.text_encoder.to("cuda")
+                te_pinned = True
         if steps:
             kwargs["num_inference_steps"] = int(steps)
         elif _state["sigmas"]:
@@ -211,16 +417,49 @@ def generate(prompt: str, size: int, steps, seed=None) -> bytes:
             kwargs["generator"] = torch.Generator(device="cuda").manual_seed(int(seed))
 
         t0 = time.time()
-        image = pipe(**kwargs).images[0]
+        try:
+            image = pipe(**kwargs).images[0]
+        finally:
+            if te_pinned:
+                pipe.text_encoder.to("cpu")
+                torch.cuda.empty_cache()
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         _state["renders"] += 1
-        log(f"出图 {size}x{size} 用时 {time.time() - t0:.1f}s（第 {_state['renders']} 张）")
+        how = f"图生图 ref={os.path.basename(ref_path)}" if ref_img is not None else "文生图"
+        log(f"出图 {width}x{height}（{how}）用时 {time.time() - t0:.1f}s（第 {_state['renders']} 张）")
         _arm_idle_timer()
         return buf.getvalue()
 
 
 # ── HTTP ──────────────────────────────────────────────────
+def _run_with_timeout(timeout: float, fn):
+    """在后台线程里跑推理，最多等 timeout 秒。
+
+    超时就把错误抛给调用方（回 504），而**不**让 HTTP 线程被钉死在里面：
+    掉进 Windows 共享内存时一张图能跑十几分钟，服务会连 /health 都答不了，
+    网关那头看到的是"连接被掐"，宿主那头就是"画图没反应"。
+    """
+    if not timeout or timeout <= 0:
+        return fn()
+    box: dict = {}
+
+    def runner():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:      # noqa: BLE001 - 原样转给调用方
+            box["error"] = exc
+
+    th = threading.Thread(target=runner, name="draw-infer", daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        raise TimeoutError(f"单张超过 {timeout:.0f} 秒还没出来（多半是显存被别的程序占着，掉进共享内存了）")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -252,6 +491,10 @@ class Handler(BaseHTTPRequestHandler):
                 "vramGB": round(torch.cuda.memory_allocated() / 2**30, 2) if torch.cuda.is_available() else 0,
                 "idleSeconds": IDLE_SECONDS,
                 "lastError": _state["last_error"],
+                "img2img": IMG2IMG,
+                "refs": _list_refs(),
+                "refDefault": _default_ref(),
+                "triggers": TRIGGERS,
             })
             return
         if self.path in ("/v1/models", "/models"):
@@ -281,21 +524,37 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, {"error": {"message": "prompt 不能为空"}})
             return
 
-        size = DEFAULT_SIZE
-        raw_size = str(body.get("size") or "").strip()
-        if "x" in raw_size:
+        # size 支持 "1024"、"1024x1024"、"768x1024"；只给一个数就按正方形
+        width = height = DEFAULT_SIZE
+        raw_size = str(body.get("size") or "").strip().lower()
+        if raw_size:
             try:
-                size = int(raw_size.lower().split("x")[0])
+                parts = [p for p in raw_size.replace("*", "x").split("x") if p]
+                if len(parts) == 1:
+                    width = height = int(float(parts[0]))
+                elif len(parts) >= 2:
+                    width, height = int(float(parts[0])), int(float(parts[1]))
             except Exception:
                 pass
         steps = body.get("steps") or (DEFAULT_STEPS or None)
 
         try:
-            png = generate(prompt, size, steps, body.get("seed"))
+            png = _run_with_timeout(
+                REQUEST_TIMEOUT,
+                lambda: generate(prompt, max(width, height), steps, body.get("seed"),
+                                 ref_name=body.get("ref"),
+                                 dims=(width, height) if width != height else None),
+            )
+        except TimeoutError as exc:
+            _state["last_error"] = str(exc)[:400]
+            _state["tainted"] = True          # 下次请求先卸载重来，别让它继续占着显存
+            log(f"出图超时（{REQUEST_TIMEOUT:.0f}s）：{exc}")
+            self._send(504, {"error": {"message": str(exc)[:400]}})
+            return
         except Exception as exc:
             _state["last_error"] = str(exc)[:400]
-            log(f"出图失败：{exc}")
-            self._send(500, {"error": {"message": str(exc)[:400]}})
+            log(f"出图失败：{exc!r}\n{traceback.format_exc()}")
+            self._send(500, {"error": {"message": str(exc)[:400] or type(exc).__name__}})
             return
 
         self._send(200, {
@@ -309,6 +568,11 @@ def main() -> None:
     log(f"听 {HOST}:{PORT}｜鉴权 {'开' if TOKEN else '关'}｜闲置退出 {IDLE_SECONDS or '常驻'}s")
     if not os.path.isdir(WEIGHTS):
         log("⚠ 权重目录不存在，等权重下完再启动")
+    refs = _list_refs()
+    log(f"参考图目录 {REFS}｜{len(refs)} 张｜图生图 {'开' if IMG2IMG else '关'}"
+        + (f"｜默认 {_default_ref()}" if refs else ""))
+    if IMG2IMG:
+        log("触发词：" + "、".join(TRIGGERS))
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
