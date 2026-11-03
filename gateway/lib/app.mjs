@@ -12,6 +12,8 @@ import { parseEmotionTag, resolveEmotionKey, emotionInstruction, emotionList } f
 import { createSayEngine } from './say.mjs';
 import { createGpuSlot } from './gpu-slot.mjs';
 import { createManagedModel } from './managed-model.mjs';
+import { createLocalSay } from './local-say.mjs';
+import { createSaySpeech } from './say-speech.mjs';
 import { createDrawProxy } from './draw-proxy.mjs';
 
 export const VERSION = '1.0.5';
@@ -451,91 +453,8 @@ export function createApp({
     return { removed, bytes };
   };
 
-  // ── 本地 TTS 进程管理（走统一的 ManagedModel）────────────
-  // 由网关自己起/停 python —— 不经过 PowerShell：脚本里的 Invoke-WebRequest 轮询
-  // 在被网关拉起时会被宿主沙箱挡住，导致白等 360 秒（2026-10-31 实测 440 秒/句）。
-  let localChild = null;
-  let localAlive = false;          // start() 之后进程是否还活着（给 ManagedModel 判"早退"）
-  const localSayPort = (() => {
-    try { return new URL(config.say.localUrl || 'http://127.0.0.1:7860').port || '7860'; } catch { return '7860'; }
-  })();
-
-  const localHealthOkRaw = async () => {
-    const response = await fetch(`http://127.0.0.1:${localSayPort}/health`, { signal: AbortSignal.timeout(3000) });
-    return response.ok;
-  };
-
-  const localSayModel = createManagedModel({
-    name: 'local-say',
-    idleMs: Number(config.say.localIdleMs) || 0,
-    startTimeoutMs: 240000,
-    pollMs: 1000,
-    now,
-    log: (m) => console.log(m),
-    health: localHealthOkRaw,
-    isDead: () => localAlive === false,
-    /** 只负责"拉起来"；等就绪的轮询由 ManagedModel 统一做。 */
-    start: async () => {
-      const python = String(config.say.localPython || '').trim();
-      const modelDir = String(config.say.localModelDir || '').trim();
-      if (!python || !modelDir) {
-        // 没配内置管理就退回用户给的命令
-        if (!config.say.localStartCmd) return false;
-        const ok = await runShell(config.say.localStartCmd, 240000);
-        localAlive = ok;
-        return ok;
-      }
-      // say-model 根目录（PYTHONPATH 要它）：优先用显式配置，否则从 .../weights/<名字> 反推
-      const root = String(config.say.localAppDir || '').trim()
-        || modelDir.replace(/[\\/]weights[\\/].*$/i, '');
-      console.log(`[say] 启动本地 Breeze：${python}（端口 ${localSayPort}）`);
-      localChild = spawn(python, ['-m', 'breeze_infer.api', modelDir, '--host', '127.0.0.1', '--port', localSayPort], {
-        cwd: root,
-        windowsHide: true,
-        env: { ...process.env, PYTHONPATH: root, PYTHONIOENCODING: 'utf-8', TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER: '0' }
-      });
-      localAlive = true;
-      localChild.stderr?.on('data', (chunk) => {
-        const text = chunk.toString('utf8').trim();
-        if (text) console.log(`[say-local] ${text.slice(-300)}`);
-      });
-      localChild.on('close', (code) => {
-        console.log(`[say] 本地 Breeze 进程退出（code=${code}）`);
-        localChild = null;
-        localAlive = false;
-      });
-      return true;
-    },
-    stop: async () => {
-      localAlive = false;
-      if (localChild && localChild.pid) {
-        if (process.platform === 'win32') {
-          try { spawn('taskkill', ['/T', '/F', '/PID', String(localChild.pid)], { windowsHide: true }); } catch { /* 忽略 */ }
-        }
-        try { localChild.kill('SIGKILL'); } catch { /* 忽略 */ }
-        localChild = null;
-      }
-      if (config.say.localStopCmd) await runShell(config.say.localStopCmd, 60000);
-      // 等显存真的释放（torch 退出到驱动回收有延迟）
-      for (let i = 0; i < 10; i += 1) {
-        if (!(await localHealthOkRaw())) break;
-        await new Promise((resolve) => setTimeout(resolve, 500));
-      }
-    }
-  });
-
-  // 旧名字保留成薄封装：调用点（yield/resume/handleSay）不用改，语义到了壳里
-  const localHealthOk = () => localSayModel.healthy();
-  const startLocalSay = () => localSayModel.ensure();
-  const stopLocalSay = () => localSayModel.shutdown('让位或闲置');
-  const clearLocalIdle = () => localSayModel.cancelIdle();
-  const armLocalIdle = () => localSayModel.armIdle();
-
-  // ── 本地 TTS 让位 ────────────────────────────────────────
-  // 本地 Breeze eager 要吃 8.4 GB：驻留时唱歌会从 10 秒变 51 秒（显存挤占）。
-  // 所以唱歌前把它停掉、说话前再拉起来。命令留空 = 不做这套调度。
-  let localSayStopped = false;
-
+  // ── 本地 TTS（进程生命周期 + 让位策略都在 lib/local-say.mjs）────────
+  // runShell 先定义：localSay 的 start/stop 要用它跑用户给的命令
   const runShell = (command, timeoutMs = 120000) => new Promise((resolve) => {
     const child = spawn(command, { shell: true, windowsHide: true });
     const timer = setTimeout(() => {
@@ -550,53 +469,22 @@ export function createApp({
     child.on('error', () => { clearTimeout(timer); resolve(false); });
   });
 
-  /** 唱歌/画图前调用：把本地 TTS 停掉，把显存让出来。
-   *
-   * 以前这里有一句 `if (config.say.engine !== 'breeze-local') return` ——
-   * 配上 `engine: auto` 就等于**永远空转**，可 auto 落本地后 TTS 一样是按需起、闲置才退的，
-   * 8.4 GB 常常正驻留着，画图/唱歌直接被挤进共享内存。所以改成按"实际上在不在跑"判断。
-   */
-  const yieldLocalSay = async () => {
-    if (localChild && localChild.exitCode === null) {
-      console.log('[say] 有重活要占显存，先停掉本地 TTS');
-      await stopLocalSay();
-      localSayStopped = true;
-      return;
-    }
-    if (!(await localHealthOk())) return;            // 端口没开 = 本来就没占显存
-    if (config.say.localStopCmd) {
-      console.log('[say] 本地 TTS 还占着端口，停掉它');
-      await stopLocalSay();
-    }
-    localSayStopped = true;
-  };
+  const localSay = createLocalSay({
+    config,
+    voice,
+    isSinging: () => activeSingJobs > 0,
+    runShell,
+    now
+  });
 
-  /** 说话前调用：确保本地 TTS 在跑（已就绪就只做一次健康检查，几毫秒）。 */
-  const resumeLocalSay = async () => {
-    if (!['breeze-local', 'auto'].includes(config.say.engine)) return false;
-    if (localChild && localChild.exitCode === null) return true;
-    if (!localSayStopped && (await localHealthOk())) return true;
-    // 正在唱歌时绝对不能 shutdown 换声常驻 —— 那会把队列里这首歌直接弄死。
-    // 交给调用方退回云端（auto）或稍后重试（breeze-local）。
-    if (activeSingJobs > 0) {
-      console.warn('[say] 唱歌进行中，暂不动换声常驻进程');
-      return false;
-    }
-    // 换声的常驻进程闲着也占 2.4 GB；本地 TTS 要 8.4 GB，10 GB 卡上会顶到颠簸
-    // （实测挤在一起时一句要 435 秒）。所以先把换声常驻收掉，下次唱歌它会自己重启。
-    if (typeof voice.shutdown === 'function') {
-      try {
-        voice.shutdown();
-        console.log('[say] 已收掉换声常驻进程，把显存让给本地 TTS');
-        await new Promise((resolve) => setTimeout(resolve, 3000));
-      } catch { /* 忽略 */ }
-    }
-    console.log('[say] 说话要用本地 TTS，正在加载模型…');
-    const ok = await startLocalSay();
-    localSayStopped = !ok;
-    if (!ok) console.warn('[say] 本地 TTS 没拉起来，将退回云端（如果配了 Key）');
-    return ok;
-  };
+  // 旧名字保留成薄封装：调用点（yield/resume/handleSay）不用改
+  const localHealthOk = () => localSay.healthy();
+  const startLocalSay = () => localSay.start();
+  const stopLocalSay = () => localSay.stop();
+  const clearLocalIdle = () => localSay.cancelIdle();
+  const armLocalIdle = () => localSay.armIdle();
+  const yieldLocalSay = () => localSay.yieldToHeavy();
+  const resumeLocalSay = () => localSay.resume();
 
   /**
    * 音高归一：测出这句话的中位基频，用 rubberband 拉到 say.pitchTarget。
@@ -728,129 +616,40 @@ export function createApp({
     yieldLocalSay: () => yieldLocalSay()
   });
 
+  // 说话合成流水线（情绪/切句/音区/音高/后期）在 lib/say-speech.mjs，这里只注入依赖
+  const saySpeech = createSaySpeech({
+    config,
+    say,
+    gpu: gpuSlot,
+    resumeLocalSay,
+    pitchNormalize,
+    synthesizeInRegister,
+    splitSayText,
+    concatAudio,
+    probeSeconds,
+    applyFilter,
+    parseEmotionTag,
+    resolveEmotionKey,
+    emotionInstruction,
+    now,
+    log: (m) => console.log(m)
+  });
+
+  /** 路由层薄封装：合成在 say-speech.mjs，这里只管回包与清理。 */
   async function handleSay(req, res, text, options = {}) {
-    const startedAt = Date.now();
-    const emotionTable = config.say.emotions || {};
-    // 文字里的标记优先于 body.emotion：模型写的比调用方猜的更贴身
-    const tagged = config.say.emotionTag !== false ? parseEmotionTag(text, emotionTable) : { emotion: '', text };
-    const askedEmotion = tagged.emotion || resolveEmotionKey(options.emotion, emotionTable);
-    const preset = askedEmotion ? emotionTable[askedEmotion] : null;
-    const speakText = String(tagged.text ?? '');
-    const voiceOptions = preset
-      ? { instructions: emotionInstruction(config.say.instructions, preset), boost: preset.boost !== false }
-      : {};
-    if (preset) console.log(`[say] 情绪=${askedEmotion}（${preset.label || ''}）`);
-
-    // 截断要留痕：以前静默截断，长回复后半段被丢掉、模型完全不知道
-    const sayMaxChars = Math.max(20, Number(config.say.maxChars) || 800);
-    const wasTruncated = String(speakText ?? '').replace(/\s+/g, ' ').trim().length > sayMaxChars;
-    clearLocalIdle();                                 // 有请求进来就别再倒计时
-
-    // 长回复切句：逐句合成 + 逐句音高归一，再拼回一条
-    const chunks = config.say.splitSentences
-      ? splitSayText(speakText, Number(config.say.maxSegmentChars) || 30)
-      : [String(speakText ?? '')];
-    const tempFiles = [];
-    let spoke;
-    /** 真正合成的部分（不含"要不要占 GPU 槽"那层决策）。 */
-    const synthesizeAll = async () => {
+    const out = await saySpeech.synthesize(text, { ...options, tmpDir });
     try {
-      if (chunks.length > 1) {
-        console.log(`[say] 切成 ${chunks.length} 句逐句合成（避免音高漂移）`);
-        const parts = [];
-        for (let i = 0; i < chunks.length; i += 1) {
-          const partRaw = path.join(tmpDir, `say-${Date.now()}-${i}.wav`);
-          const part = await synthesizeInRegister(chunks[i], partRaw, 42, voiceOptions);
-          tempFiles.push(part.file);
-          let normalizedPart = part.file;
-          if (part.via !== 'cloud') {
-            normalizedPart = await pitchNormalize(part.file);
-            if (normalizedPart !== part.file) tempFiles.push(normalizedPart);
-          }
-          parts.push(normalizedPart);
-        }
-        const merged = path.join(tmpDir, `say-${Date.now()}-merged.wav`);
-        const ok = await concatAudio(parts, merged, { ext: 'wav' });
-        if (!ok) throw Object.assign(new Error('分段合成后拼接失败'), { code: 'E_SAY_CONCAT' });
-        tempFiles.push(merged);
-        return { file: merged, bytes: fs.statSync(merged).size, chars: speakText.length, format: 'wav' };
-      }
-      {
-        const raw = path.join(tmpDir, `say-${Date.now()}.wav`);
-        try {
-          spoke = await synthesizeInRegister(speakText, raw, 42, voiceOptions);
-        } catch (error) {
-          // auto：云端挂了才落本地。**必须先拿到 GPU 槽**——本地 TTS 要 8.2 GB，
-          // 画图/唱歌正在跑的时候硬拉起来就是两个一起掉进共享内存，宁可让宿主退回文字。
-          if (config.say.engine !== 'auto') throw error;
-          spoke = await gpuSlot.run('say', async () => {
-            const prepared = await resumeLocalSay();
-            if (!prepared) throw error;
-            return await synthesizeInRegister(speakText, raw, 42, voiceOptions);
-          });
-        }
-        tempFiles.push(spoke.file);
-        // 云端输出保持原样（那是官方音色，改音高反而会走味）
-        if (spoke.via !== 'cloud') {
-          const normalized = await pitchNormalize(spoke.file);
-          if (normalized !== spoke.file) { tempFiles.push(normalized); spoke.file = normalized; }
-        }
-        spoke.format = /mp3$/i.test(spoke.file) ? 'mp3' : spoke.format;
-        return spoke;
-      }
-    } catch (error) {
-      const code = String(error?.code || 'E_SAY');
-      for (const f of tempFiles) { try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ } }
-      // 401/额度类错误原样带出去：使用者最需要知道的是"Key 不对"还是"没钱了"
-      throw Object.assign(new Error(`读这段话失败：${String(error?.message ?? error).slice(0, 240)}`), { code });
-    }
-    };
-
-    // 本地 TTS 要 8.2 GB：breeze-local 必然要占槽；auto 只在云端失败那一刻才占（见上面的 catch）。
-    if (config.say.engine === 'breeze-local') {
-      spoke = await gpuSlot.run('say', async () => {
-        await resumeLocalSay();          // 拿到槽位之后才把本地模型拉起来
-        return await synthesizeAll();
+      res.writeHead(200, {
+        'content-type': out.contentType,
+        'content-length': out.buffer.length,
+        'x-audio-seconds': String(out.seconds),
+        ...(out.wasTruncated ? { 'x-truncated': '1', 'x-max-chars': String(out.sayMaxChars) } : {})
       });
-    } else {
-      spoke = await synthesizeAll();
+      res.end(out.buffer);
+    } finally {
+      out.cleanup();
+      armLocalIdle();                                 // 说完开始闲置倒计时
     }
-
-    // 情绪后期加工：合成时已经带了表演指令，这里再补响度/节奏/硬度。
-    // ffmpeg 只动响度和时间尺度、不动音高，所以音色不受影响；
-    // 失败（没 ffmpeg / 滤镜写错）就发未加工的版本，别为了一点音色把语音整单搞死。
-    if (preset?.filter) {
-      const ext = /mp3$/i.test(spoke.file) ? 'mp3' : 'wav';
-      const filtered = path.join(tmpDir, `say-${Date.now()}-emo.${ext}`);
-      const filteredOk = await applyFilter(spoke.file, filtered, preset.filter, { ext });
-      if (filteredOk && fs.existsSync(filtered)) {
-        tempFiles.push(filtered);
-        spoke = { ...spoke, file: filtered, bytes: fs.statSync(filtered).size, format: ext };
-      } else {
-        console.warn('[say] 情绪加工没跑成（ffmpeg 不可用或滤镜不合法），发未加工的音频');
-      }
-    }
-
-    const buffer = fs.readFileSync(spoke.file);
-    const contentType = spoke.format === 'wav' ? 'audio/wav'
-      : spoke.format === 'mp3' ? 'audio/mpeg'
-        : spoke.format === 'opus' ? 'audio/ogg' : 'application/octet-stream';
-    const probed = Math.round(await probeSeconds(spoke.file)) || 0;
-    // 探不到时长就按中文语速估（约 4.5 字/秒），别报 0 让宿主又说"才一秒"
-    const seconds = probed > 0 ? probed : Math.max(1, Math.round(spoke.chars / 4.5));
-    console.log(`[say] ${spoke.chars} 字 → ${seconds} 秒（${Math.round(buffer.length / 1024)} KB，${Date.now() - startedAt}ms）`);
-    if (wasTruncated) console.warn(`[say] 文本超过 say.maxChars=${sayMaxChars}，后半段已被丢弃`);
-    res.writeHead(200, {
-      'content-type': contentType,
-      'content-length': buffer.length,
-      'x-audio-seconds': String(seconds),
-      ...(wasTruncated ? { 'x-truncated': '1', 'x-max-chars': String(sayMaxChars) } : {})
-    });
-    res.end(buffer);
-    for (const f of new Set([...tempFiles, spoke.file])) {
-      try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ }
-    }
-    armLocalIdle();                                   // 说完开始闲置倒计时
   }
 
   const handler = async (req, res) => {
@@ -921,7 +720,7 @@ export function createApp({
         voiceResidentMs: Number(voice.residentIdleMs) || 0,
         // 谁现在占着 GPU、还有几个在排队（三个租户共享一个槽位，见 gpu-slot.mjs）
         gpu: { owner: gpuSlot.owner(), waiting: gpuSlot.waiting(), ...gpuSlot.stats() },
-        models: { localSay: localSayModel.status(), draw: drawProxy.status() },
+        models: { localSay: localSay.status(), draw: drawProxy.status() },
         source: source.type,
         neteaseCookie: typeof source.hasCookie === 'function' ? source.hasCookie() : Boolean(config.source.neteaseCookie),
         voiceSeconds: runtimeVoiceSeconds ?? (config.voiceMessageDefaultSeconds ?? 90),
@@ -1118,7 +917,7 @@ export function createApp({
         // 本地模型闲置退出后进程不在，但"能服务"——不该让插件显示成离线。
         // 只要配置齐（python + 权重目录都在），就算 idle 也报在线，附一句说明。
         let { online, note } = status;
-        const localRunning = Boolean(localChild);
+        const localRunning = localSay.running();
         if (config.say.engine === 'breeze-local' && !localRunning) {
           const canStart = Boolean(config.say.localPython && config.say.localModelDir)
             && fs.existsSync(config.say.localModelDir);
@@ -1234,5 +1033,5 @@ export function createApp({
     }
   };
 
-  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say, gpu: gpuSlot, draw: drawProxy };
+  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say, gpu: gpuSlot, draw: drawProxy, localSay };
 }
