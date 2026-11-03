@@ -1,9 +1,9 @@
 {
   "id": "sing",
   "apiVersion": 2,
-  "name": "说话·唱歌·画图",
+  "name": "点歌唱歌",
   "version": "1.0.6",
-  "description": "说话 / 唱歌 / 画图：机器人用 Breeze TTS 说话（云端 50 音色或本机权重），用你训练的音色翻唱并发语音条，还能本机出图（Qwen-Image-2.1-Turbo，1024² 约 25 秒/张）。⚠️ 三条能力都要跑在使用者自己的电脑上（say-sing-drawPlugin 仓库的 gateway/ + draw-model/），这台服务器只做转发、不跑模型；本机没开时只会提示后端离线。",
+  "description": "点歌唱歌：群里说「用语音唱一首X」，机器人用你训练好的音色翻唱并发语音条；非点歌文本交给 Breeze TTS 说话。同一套后端仓库（say-sing-drawPlugin）还带**本地画图**（Qwen-Image-2.1-Turbo，1024² 约 25 秒/张），配好 draw-model 后机器人就能自己画图。⚠️ 三条能力都要跑在使用者自己的电脑上（仓库里的 gateway/ 与 draw-model/ + 各模型权重），这台服务器只做转发、不跑模型；本机没开时只会提示后端离线。",
   "author": "BAofanTing",
   "homepage": "https://github.com/BAOfanTing/say-sing-drawPlugin",
   "license": "MIT",

@@ -58,7 +58,7 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root
 > bash /opt/qq-agent/set-tts-url.sh     https://<隧道地址>/v1
 > ```
 
-然后在控制台 → 插件 → 说话·唱歌·画图里确认「网关地址」「网关令牌」已填好。
+然后在控制台 → 插件 → 点歌唱歌里确认「网关地址」「网关令牌」已填好。
 走云端说话的话，再到「说话（Breeze 云端）」填 API Key 与音色 id。
 
 群里试两句：
