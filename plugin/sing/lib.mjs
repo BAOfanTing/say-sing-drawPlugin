@@ -4,19 +4,11 @@
 export const DEFAULTS = Object.freeze({
   gatewayUrl: '',
   defaultVoice: '',
-  maxSeconds: 60,
   // 语音条（宿主 send_voice 通道）唱多久：插件会把改这个值推给网关
   voiceSeconds: 120,
   allowInsecureHttp: false,
-  // 默认只用语音条：群文件是可选能力，关着时绝不走 cap.send.file
-  allowFileOutput: false,
   pollIntervalMs: 2000
 });
-
-/** 工具级超时（manifest.tools[].timeoutMs 与这里保持一致，轮询截止时间按它倒推）。 */
-export const TOOL_TIMEOUT_MS = 300000;
-/** 留出下载 + 发送 + 回包的余量：轮询到点就停，不要等到宿主硬超时。 */
-export const POLL_RESERVE_MS = 20000;
 
 const clampInt = (value, min, max, fallback) => {
   const n = Math.floor(Number(value));
@@ -36,7 +28,7 @@ export function joinUrl(base, pathname) {
  * 校验并规范化网关地址。
  * 默认只收 https：插件进程拿到的 token 会随每次请求发出去，明文 http 等于把 token 送给链路中间人。
  * 局域网自建（如 http://192.168.1.5:8899）需要显式打开 allowInsecureHttp —— 而且宿主的
- * cap.http.request / cap.media.download 强制 allowPrivate:false，内网地址本来就发不出去。
+ * cap.http.request 强制 allowPrivate:false，内网地址本来就发不出去。
  */
 export function normalizeGatewayUrl(raw, { allowInsecureHttp = false } = {}) {
   const text = String(raw ?? '').trim();
@@ -79,12 +71,9 @@ export function normalizeSettings(raw) {
   return {
     gatewayUrl: String(input.gatewayUrl ?? DEFAULTS.gatewayUrl).trim(),
     defaultVoice: String(input.defaultVoice ?? DEFAULTS.defaultVoice).trim(),
-    maxSeconds: clampInt(input.maxSeconds, 5, 280, DEFAULTS.maxSeconds),   // 群文件路径受工具 300s 超时限制
-    // 0 = 唱完整首；其余 5..360 秒
-    // 0 = 唱完整首（网关会分段换声，每段留在显存安全区）
+    // 0 = 唱完整首（网关会分段换声，每段留在显存安全区）；其余 5..600 秒
     voiceSeconds: Number(input.voiceSeconds) === 0 ? 0 : clampInt(input.voiceSeconds, 5, 600, DEFAULTS.voiceSeconds),
     allowInsecureHttp: input.allowInsecureHttp === true,
-    allowFileOutput: input.allowFileOutput === true,
     pollIntervalMs: clampInt(input.pollIntervalMs, 1000, 10000, DEFAULTS.pollIntervalMs),
     breezeEmail: String(input.breezeEmail ?? '').trim(),
     breezeAutoClaim: input.breezeAutoClaim !== false,
@@ -113,38 +102,6 @@ export function authHeaders(token) {
   return value ? { authorization: `Bearer ${value}` } : {};
 }
 
-/**
- * 宿主 cap.media.download 的文件名规则：`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`。
- * 网关给的 jobId 一律过一遍白名单，避免把奇怪字符带进 media 目录名。
- */
-export function mediaFileName(jobId, ext = 'mp3') {
-  const safe = String(jobId ?? '').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 32);
-  const suffix = /^[a-z0-9]{1,4}$/.test(String(ext)) ? String(ext) : 'mp3';
-  if (!safe) throw new Error('网关返回的 jobId 不可用（无法生成文件名）');
-  return `sing-${safe}.${suffix}`;
-}
-
-/** 网关 /jobs 的响应 → 我们只认这几种状态，其余按 failed 处理（宁可报错也不假装在跑）。 */
-export function parseJob(json) {
-  const data = json && typeof json === 'object' ? json : {};
-  const state = String(data.state ?? '').trim().toLowerCase();
-  if (!['queued', 'running', 'done', 'failed'].includes(state)) {
-    return { state: 'failed', message: `网关返回了无法识别的任务状态：${state || '(空)'}` };
-  }
-  return {
-    state,
-    jobId: String(data.jobId ?? '').trim(),
-    title: String(data.title ?? '').trim(),
-    artist: String(data.artist ?? '').trim(),
-    engine: String(data.engine ?? '').trim(),
-    progress: Math.min(1, Math.max(0, Number(data.progress) || 0)),
-    audioUrl: String(data.audioUrl ?? '').trim(),
-    bytes: Math.max(0, Number(data.bytes) || 0),
-    seconds: Math.max(0, Number(data.seconds) || 0),
-    message: String(data.message ?? '').trim()
-  };
-}
-
 /** 秒 → "1分03秒"，给模型和用户看的短句。 */
 export function formatDuration(seconds) {
   const total = Math.max(0, Math.round(Number(seconds) || 0));
@@ -155,13 +112,6 @@ export function formatDuration(seconds) {
   return sec ? `${min} 分 ${sec} 秒` : `${min} 分`;
 }
 
-/** 网关返回的 audioUrl → 绝对地址（允许网关返回相对路径，省得它关心自己挂在哪个域名后面）。 */
-export function resolveAudioUrl(gatewayUrl, audioUrl) {
-  const target = String(audioUrl ?? '').trim();
-  if (!target) return '';
-  if (/^https?:\/\//i.test(target)) return target;
-  return joinUrl(gatewayUrl, target);
-}
 
 /** 把宿主能力调用抛出的错误转成"模型能据此行动"的短句。 */
 export function describeError(error) {

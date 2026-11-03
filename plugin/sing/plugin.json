@@ -14,9 +14,7 @@
     "log",
     "config",
     "secrets",
-    "http",
-    "media",
-    "send"
+    "http"
   ],
   "engines": {
     "minVersion": "0.9.10"
@@ -109,13 +107,6 @@
             "help": "网关配置里的音色名（比如 me）；留空表示用网关的默认值"
           },
           {
-            "key": "allowFileOutput",
-            "label": "允许发群文件（默认关）",
-            "type": "boolean",
-            "default": false,
-            "help": "关闭时只用语音条（宿主 send_voice 通道）；开启后模型才会用群文件发 mp3。关着时点歌工具会提示改用语音。"
-          },
-          {
             "key": "voiceSeconds",
             "label": "语音条唱多久（秒，0 = 整首）",
             "type": "number",
@@ -123,15 +114,6 @@
             "min": 0,
             "max": 600,
             "help": "填 0 唱完整首（网关按 30 秒一段分别换声再拼回去，整首 4 分钟约 22 秒出结果）；也可以填 5-600 的秒数。改完插件自动同步给网关，重启也保留。"
-          },
-          {
-            "key": "maxSeconds",
-            "label": "群文件唱多久（秒）",
-            "type": "number",
-            "default": 60,
-            "min": 5,
-            "max": 280,
-            "help": "只在打开「允许发群文件」时生效。群文件路径受插件工具 300 秒超时限制，实际可用约 280 秒（含搜索/下载/换声），所以上限设 280；想唱整首请用「语音条」那条通道（`voiceSeconds`，最长 600 秒）。"
           }
         ]
       },
@@ -219,31 +201,6 @@
         },
         "required": [
           "action"
-        ]
-      }
-    },
-    {
-      "name": "sing_song",
-      "description": "点歌并把翻唱结果作为【群文件】发到当前群。⚠️ 默认关闭：设置里「允许发群文件」未开时本工具会直接拒绝。平时请用 send_voice 并把输入写成「唱：歌名」，那条路发的是 QQ 语音条。",
-      "timeoutMs": 300000,
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "song": {
-            "type": "string",
-            "description": "歌名，可以带歌手（例如「孤勇者 陈奕迅」）"
-          },
-          "voice": {
-            "type": "string",
-            "description": "音色名（网关里配置的模型名）；留空用插件设置里的默认音色"
-          },
-          "maxSeconds": {
-            "type": "number",
-            "description": "最多唱多少秒（5-280，受插件工具 300 秒超时限制），默认取插件设置"
-          }
-        },
-        "required": [
-          "song"
         ]
       }
     },

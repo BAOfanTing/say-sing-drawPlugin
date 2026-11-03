@@ -193,7 +193,7 @@ if ($NoTunnel) {
             Write-Host '⚠ 有画图权重但没有 draw-model\start-draw.ps1' -ForegroundColor Yellow
         } else {
             Write-Host ''
-            Write-Host '▶ 起出图服务（7880，闲置 5 分钟自动卸载）…' -ForegroundColor Cyan
+            Write-Host '▶ 起出图服务（7880，闲置 3 分钟自动卸载）…' -ForegroundColor Cyan
             $task = schtasks.exe /Query /TN 'QQAgentDrawService' 2>$null
             if ($task) {
                 schtasks.exe /Run /TN 'QQAgentDrawService' | Out-Null

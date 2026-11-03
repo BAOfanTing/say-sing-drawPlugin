@@ -13,7 +13,7 @@
 |---|---|---|---|
 | ① | 插件设置「语音条唱多久」 | 插件设置页 → `voiceSeconds` → 通过 `POST /admin/voice-seconds` 推给网关 | **0（整首）** |
 | ② | 语音条通道硬上限 | `gateway/lib/app.mjs`：`cap = config.voiceMessageMaxSeconds` | 600 |
-| ③ | 单次任务上限（语音条和群文件**都**受它管） | `gateway/lib/app.mjs`：`runSingJob` 里 `Math.min(config.maxSeconds, …)` | 600 |
+| ③ | 单次换声任务上限（语音条受它管） | `gateway/lib/app.mjs`：`runSingJob` 里 `Math.min(config.maxSeconds, …)` | 600 |
 | ④ | 宿主 TTS 请求超时 | `tts.timeoutMs`（宿主 config.json） | 600000（**需手动调**，宿主出厂默认只有 120000） |
 
 生效值链路：

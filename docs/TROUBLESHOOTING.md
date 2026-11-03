@@ -11,39 +11,6 @@ bash /opt/qq-agent/set-tts-url.sh https://127.0.0.1:8898/v1
 
 （专线的搭建见 [TUNNEL.md](TUNNEL.md) 的「备用专线」。插件的 gatewayUrl 不受影响。）
 
-群里报 `OneBot upload_group_file 失败: retcode=100 ENOENT ... realpath '…/plugin-data/sing/media/sing-xxxx.mp3'`
-
-**一句话**：文件在服务器上是好的，但 OneBot 看不到那个路径 —— 你的 OneBot（SnowLuma）跑在
-Docker 容器里，容器只挂了 `snowluma/data`，而插件的媒体文件写在 `qq-agent/data/plugin-data/`。
-
-**为什么会这样**：宿主的 `cap.send.file` 传给 OneBot 的是**宿主机绝对路径**
-（`src/onebot/sender.js` → `onebot.call('upload_group_file', { file })`）。
-容器内的 `realpath` 解析不到宿主路径，于是 `retcode=100`。
-
-**修**：跑一次桥接脚本（幂等，不会重建容器，QQ 不用重新扫码）：
-
-```bash
-sudo bash scripts/bridge-container-paths.sh
-```
-
-它做两件事：
-
-1. 宿主机：`data/plugin-data` → `snowluma/data/plugin-data`（原位置留软链）；
-2. 容器内：建 `/opt/qq-agent/data -> /app/data`，让宿主路径在容器里能解析。
-
-跑完可以用这个自检（在容器里能列出媒体文件就对了）：
-
-```bash
-docker exec qq-agent-snowluma ls /opt/qq-agent/data/plugin-data/sing/media/
-```
-
-**注意**：
-
-- 容器**重建**（`docker rm` / `docker compose up --force-recreate`）后第 2 步会丢，重跑脚本即可；
-- 第 1 步是宿主机软链，重启不丢；
-- 更好的长期方案是让宿主 `cap.send.file` 支持 base64（这样就不用管容器挂载），
-  那需要改 qq-agent 本体，见下面的「想给宿主提改进」。
-
 ## 点歌成功但收到的是「音源原声」而不是翻唱
 
 `gateway/config.json` 里 `voice.engine` 还是 `none`。改成 `command` 并配好 `voice.command`
@@ -61,12 +28,6 @@ VIP 曲匿名拿不到直链。二选一：
 
 - 在 `gateway/config.json` 的 `source.neteaseCookie` 填登录后的 `MUSIC_U=…`（有 VIP 就能取原唱）；
 - 什么都不填也可以：网关会自动降级到同名的**免费翻唱版**，并在结果里注明「原唱源受限」。
-
-## 想给宿主提改进（base64 直发）
-
-真正干净的修法是让 `cap.send.file` 在 OneBot 与插件不共享文件系统时，改走 base64 上传
-（`upload_group_file` 的 `file` 传 `base64://…`）。这属于宿主侧改动，建议带上这份排错记录去提 issue：
-现象、根因（docker 挂载与宿主绝对路径不一致）、复现步骤（任何在容器化 OneBot 上 `cap.send.file` 的插件都会中）。
 
 ## 语音条报 `fetch failed` / 机器人说"语音服务死了"
 

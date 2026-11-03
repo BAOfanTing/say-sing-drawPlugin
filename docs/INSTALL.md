@@ -60,7 +60,7 @@ bash /opt/qq-agent/set-tts-url.sh     https://<第 2 步的地址>/v1
 
 | 谁 | 用什么地址 | 原因 |
 |---|---|---|
-| 插件（发群文件） | 必须是**公网**（Cloudflare 隧道） | 宿主 `cap.http` 禁用内网地址 |
+| 插件 | 必须是**公网**（Cloudflare 隧道） | 宿主 `cap.http` 禁用内网地址 |
 | 宿主语音条 | `https://127.0.0.1:8898/v1`（专线）也可以用 | 服务器访问自己的公网 IP:8898 常被安全组挡 |
 
 ### ④ 验证
@@ -76,13 +76,13 @@ bash /opt/qq-agent/check-lines.sh      # 隧道口 / 8898 / 宿主 TTS 真链路
 | 章节 | 内容 |
 |---|---|
 | 0 | 目录结构 |
-| 1（1.1-1.11） | **部署主体**：Python 环境 → RVC 资产 → 音色权重 → 网关配置 → 启动 → 暴露 https → 装插件 → 填设置 → 语音条通道 → 容器桥接 → 画图（可选） |
+| 1（1.1-1.10） | **部署主体**：Python 环境 → RVC 资产 → 音色权重 → 网关配置 → 启动 → 暴露 https → 装插件 → 填设置 → 语音条通道 → 画图（可选） |
 | 2 | 网易云扫码登录（VIP 曲原唱） |
 | 3 | 服务器侧 IPv6 加固（一次性） |
 | 4 | 发帖/写文档时的截图清单 |
 | 5 | 开机自启用计划任务（Windows） |
 
-> 最上面「关掉之后怎么重新起」是三步速查（起网关 → 暴露 https → 填地址），和下面 1.x 是同一套东西的精简版。
+> 最上面「关掉之后怎么重新起」是速查（起网关 → 暴露 https → 填地址 → 验证），和下面 1.x 是同一套东西的精简版。
 
 ---
 
@@ -93,7 +93,8 @@ plugin/sing/          qq-agent 插件本体（零依赖，可打包上架）
   plugin.json         manifest（apiVersion 2；能力 tools/schedule/log/config/secrets/http/media/send）
   index.mjs           协议接线 + 七个工具 + 每小时一次的零点清理/领额度触发
   lib.mjs             纯函数（地址校验、设置收敛、文件名白名单、任务状态机）
-gateway/              跑在你电脑上的换声网关（零依赖 Node）
+  vendor/qrcode.cjs   自带的 QR 库（控制台「扫码登录」用；.cjs 是因为仓库是 type=module）
+gateway/              跑在你电脑上的网关（零依赖 Node）：唱歌 + 说话 + 画图透传
   server.mjs          入口；含每天 00:00 的成品清理排程
   lib/config.mjs      配置读写与校验
   lib/sources.mjs     音源：网易云 / 本地目录（含搜索排序打分）
@@ -101,24 +102,30 @@ gateway/              跑在你电脑上的换声网关（零依赖 Node）
   lib/app.mjs         路由 + 流水线（/health /search /sing /jobs /files /v1/audio/speech
                       /say/status /say/voices /say/config /admin/voice-seconds /admin/prune
                       /v1/images/generations /login*）
+  lib/jobs.mjs        串行任务队列（带进度与 TTL）
+  lib/emotions.mjs    说话情绪预设（标记 → 表演指令 + ffmpeg 滤镜）
   web/login.html      网易云扫码登录页（二维码在本地渲染，key 不出本机）
   web/qrcode.js       内置 QR 生成库（MIT，离线可用，不依赖任何 CDN）
-  plugin/sing/vendor/qrcode.cjs  插件自带的 QR 库（控制台「扫码登录」用；.cjs 是因为仓库是 type=module）
-  lib/jobs.mjs        串行任务队列（带进度与 TTL）
-sing-model/
+sing-model/           唱歌：RVC 换声（weights 不入库）
   run.py              换声编排：裁剪 → 分离 → 换声 → 混伴奏（网关调的就是它）
   fetch-*.ps1         拉模型的脚本（分块/续传，国内镜像会断流）
   rvc/                新版 RVC 源码（入库）；rvc/assets/ 下的权重不入库，只保留空目录（.gitkeep）
-docs/PROTOCOL.md      插件 ↔ 网关 HTTP 契约（想用别的语言重写后端看这个）
-docs/TUNNEL.md        把本机网关暴露成 https 的三种做法
-docs/TROUBLESHOOTING.md  排错（含容器化 OneBot 发文件失败那个坑）
-docs/TUNING.md       调优与踩坑笔记（时长四道闸、显存、历史踩坑、验收清单）
-scripts/bridge-container-paths.sh  把插件媒体目录桥接进 OneBot 容器
+say-model/            说话：Breeze TTS 2 本地推理（可选；weights/ 不入库）
+  check-ckpt.py       权重体检（start-all.ps1 会调）
+  start-local.ps1     手动起本地说话服务（调试用；平时由网关按需拉起）
+draw-model/           画图：Qwen-Image-2.1-Turbo 本地出图（可选；weights/ 不入库）
+  server.py           OpenAI 兼容 /v1/images/generations（懒加载 + 闲置 180 秒卸载）
+  start-draw.ps1      一键启动（检查权重、强制 HF 离线）
+scripts/
+  start-all.ps1       一键：体检 + 生成配置 + 网关 + 隧道（有权重时连画图一起）
+  sync-host-url.ps1   把地址同步到服务器（插件 → 隧道、语音条 → 8898 专线）
+  run-gateway-forever.ps1 / run-tunnel-local.ps1  常驻脚本（计划任务用）
+  watchdog.ps1        看门狗：8899 / 隧道 / 7880 不通就重启对应任务
 start-gateway.bat / start-tunnel.bat  Windows 一键启动
-test/                 52 个用例（5 个文件，含"子进程跑插件、测试扮演宿主"的真协议测试）
+docs/                 QUICKSTART / INSTALL / ENV / SPEAK / DRAW / TUNING / TUNNEL /
+                      TROUBLESHOOTING / PROTOCOL / DEVELOPMENT
+test/                 55 个用例（5 个文件，含"子进程跑插件、测试扮演宿主"的真协议测试）
 ```
-
----
 
 ---
 
@@ -129,7 +136,7 @@ test/                 52 个用例（5 个文件，含"子进程跑插件、测�
 1. 电脑上装 RVC 环境 + 网关 → 本机 `127.0.0.1:8899` 能点歌；
 2. 把网关暴露成 **https**（宿主强制禁内网，`127.0.0.1` 填不进去）；
 3. 服务器上装插件、填设置；
-4. （要发群文件的话）把插件媒体目录**桥接进 OneBot 容器**。
+4. （可选）装本地出图后端 `draw-model/`，让机器人能画图。
 
 ### 1.1 电脑端：Python 环境（RVC）
 
@@ -220,7 +227,7 @@ cp config.example.json config.json
 | `voice.defaultVoice` | 默认音色名（例如 `hanser`） |
 | `outputArtist` | 群里显示的「演唱者」名字，默认 **小鲸鱼**（原唱信息只留在"原唱受限"说明里） |
 | `transcode` | `auto`（有 ffmpeg 就转 mp3 并裁剪）/ `never` |
-| `maxSeconds` | 群文件通道最长时间（默认 **600** 秒，上限也被夹在 600） |
+| `maxSeconds` | 单次换声任务上限（默认 **600** 秒，上限也被夹在 600）；语音条也受它管 |
 | `voiceMessageMaxSeconds` | 语音条通道硬上限，默认 **600** 秒（插件推上来的值会被它夹紧） |
 | `voiceMessageDefaultSeconds` | 语音条默认时长，默认 90 秒（插件没推值时用它；0 = 整首由插件设置决定） |
 | `voice.segmentSeconds` | 长音频切段长度，默认 **30** 秒（整批只加载一次模型；设 0 = 不分段） |
@@ -306,7 +313,7 @@ chown -R qqagent:qqagent plugins/sing
 | 网关地址 | 隧道给的 `https://…`（不要带结尾斜杠） |
 | 网关令牌 | 与 `gateway/config.json` 的 `token` 一致 |
 | 默认音色 | 例如 `hanser` |
-| 最长演唱秒数 | 群文件通道用的秒数（语音条通道另有上限） |
+| 语音条唱多久 `voiceSeconds` | 0 = 整首；也可填 5-600 秒 |
 | 任务轮询间隔 / 允许 http 网关 | 保持默认即可（后者仅调试用） |
 
 也可以用控制台 API 批量写（脚本里就是这么做的）：
@@ -355,26 +362,7 @@ curl -X POST http://127.0.0.1:3210/api/config \
 > 注意：正因为普通文本也走这里，`intent.bareTitle` 默认关闭 —— 否则模型回一句「好的」
 > 会被当成歌名去唱歌（见 TUNING.md）。
 
-### 1.10 服务器端：把媒体目录桥接进 OneBot 容器（发群文件必须）
-
-如果 OneBot（SnowLuma）跑在 Docker 里，宿主的 `cap.send.file` 传的是**宿主绝对路径**，
-容器里解析不到 → `upload_group_file retcode=100 ENOENT`。
-
-```bash
-sudo bash scripts/bridge-container-paths.sh
-# 幂等；不重建容器、不用重新扫码登录
-```
-
-它做两件事：宿主 `data/plugin-data` → 挪进容器可见的 `snowluma/data/`（原位置留软链）；
-容器内建 `/opt/qq-agent/data -> /app/data`。
-
-> **容器重建后**（`docker rm` / `compose up --force-recreate`）重跑一次即可。
-
----
-
----
-
-### 1.11 画图（可选，本地扩散模型）
+### 1.10 画图（可选，本地扩散模型）
 
 想让机器人自己画图，再装一套出图后端（**纯 Python，不需要 ComfyUI**）：
 
@@ -461,6 +449,9 @@ schtasks /Create /TN "QQAgentSingTunnel" /TR "powershell.exe -ExecutionPolicy By
 schtasks /Run /TN "QQAgentSingGateway"
 schtasks /Run /TN "QQAgentSingTunnel"
 ```
+
+> 想再省点心就加个看门狗（8899 / 隧道 / 7880 任一不通就自动重启对应任务），
+> 注册命令见 [TUNNEL.md](TUNNEL.md) 的「看门狗」一节；画图服务的常驻任务也在那一节。
 
 > 2026-10-31 踩过：`run-tunnel-local.ps1` 原来把参数叫 `$Host`，那是 PowerShell 的只读自动变量，
 > 一传就报 "VariableNotWritable"，隧道根本起不来。现在改名为 `-SshHost`。

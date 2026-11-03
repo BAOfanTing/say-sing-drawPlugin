@@ -1,16 +1,14 @@
 # 把本机网关暴露成 https
 
 > **先用方案一（Cloudflare 快速隧道）**：零成本、自动证书、一条命令。
-> 实测整首 3:54 的歌走隧道端到端约 **43 秒**（含冷启动；常驻后约 22 秒），**不会**撞上它的 100 秒上限。
-> 快速隧道能跑通单首歌（整首 3:54 端到端约 43 秒，含冷启动；换声常驻后约 22 秒），但**冷启动 + 排队 + 超长歌可能越过 100 秒上限**（→ 524）。要稳定就把语音条切到 8898 专线；插件的「网关地址」继续用隧道没问题（它只发短请求）。
-
-> ⚠️ **快速隧道（trycloudflare 匿名隧道）有个硬约束：源站超过约 100 秒没响应，Cloudflare 就回 `524`。**
-> 唱歌要几十秒到一分半（整首 3:54 每次起进程约 85 秒、换声常驻约 22 秒，再排个队就可能越线），**所以语音条那条通道建议走 8898 专线**。
+> 它能跑通单首歌（整首 3:54 端到端约 **43 秒**，含冷启动；换声常驻后约 22 秒），但有个硬约束：
+> **源站超过约 100 秒没响应，Cloudflare 就回 `524`** —— 每次起进程整首约 85 秒，再赶上冷启动、
+> 排队或更长的歌就可能越线。
 >
 > | 通道 | 走哪 | 原因 |
 > |---|---|---|
 > | 插件（`/sing`、`/jobs`、`/files`、`/login`） | 快速隧道可以 | 都是短请求（202 + 轮询 + 下载） |
-> | 宿主语音条（`/v1/audio/speech`） | **本机 8898 专线**（ssh -R + nginx TLS）或 named tunnel | 宿主同步等音频，几十秒起步，快速隧道必然 524 |
+> | 宿主语音条（`/v1/audio/speech`） | **建议 8898 专线**（ssh -R + nginx TLS）或 named tunnel | 宿主同步等音频，几十秒起步，越线就 524 |
 >
 > 语音条走 `https://127.0.0.1:8898/v1` 还有个好处：不经第三方、地址永不变。配置见文末「备用专线」一节。
 
@@ -174,6 +172,14 @@ schtasks /Create /TN "QQAgentWatchdog" /SC MINUTE /MO 5 /RL HIGHEST /F ^
 ```
 
 日志在 `logs/watchdog.log`，**只有发生重启时才写**，平时不会刷屏。
+
+> 画图那行（`QQAgentDrawService`）要先注册这个任务看门狗才会管；没注册它会自动跳过，
+> `start-all.ps1` 则会用隐藏进程临时拉起：
+>
+> ```powershell
+> schtasks /Create /TN "QQAgentDrawService" /SC ONLOGON /RL HIGHEST /F ^
+>   /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File <仓库路径>\draw-model\start-draw.ps1"
+> ```
 
 > 注意：手动 `schtasks /Run /TN QQAgentSingTunnel` 时如果隧道已经连着，会因为远端端口占用而
 > `ExitOnForwardFailure` 退出、5 秒后重连——中间会有十几秒 502。要重启就先确认没有 ssh 进程。

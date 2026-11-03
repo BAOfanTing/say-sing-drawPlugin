@@ -1,25 +1,24 @@
 // 点歌唱歌：qq-agent 插件入口（apiVersion 2）。
 //
-// 这里只做两件事：把 stdin/stdout 上的 NDJSON 协议接起来，以及把"点歌 → 等换声 → 下载 → 发群文件"
-// 串成一条流程。真正的搜歌/换声在你自己的电脑上（gateway/ 目录），插件这边永远只是个薄客户端。
+// 这里只做一件事：把 stdin/stdout 上的 NDJSON 协议接起来，给模型几个查询工具
+// （点歌搜索、后端状态、说话音色、额度领取、网易云登录）。
+// **唱歌和说话都不经过插件**：宿主 send_voice 直接打网关 /v1/audio/speech，返回语音条。
+// 真正的搜歌/换声在你自己的电脑上（gateway/ 目录），插件这边永远只是个薄客户端。
 //
-// 三条硬约束（来自宿主 docs/PLUGINS.md）：
-//   1. 联网只能走 cap.http.request / cap.media.download，且**强制 allowPrivate:false** ——
-//      网关不能被 127.0.0.1 直连，必须是有公网域名的 https（见 docs/TUNNEL.md）。
-//   2. cap.send.file 只支持群聊，且只发 plugin-data/sing/media/ 里的文件。
-//   3. 插件进程没有写权限、没有子进程：落盘与转码都在网关侧完成。
+// 两条硬约束（来自宿主 docs/PLUGINS.md）：
+//   1. 联网只能走 cap.http.request，且**强制 allowPrivate:false** —— 网关不能被 127.0.0.1 直连，
+//      必须是有公网域名的 https（见 docs/TUNNEL.md）。
+//   2. 插件进程没有写权限、没有子进程：落盘与转码都在网关侧完成。
+//
+// 唱歌只有一条通道：宿主 send_voice → 网关 /v1/audio/speech → 语音条。
+// 早年的"点歌 → 发群文件"那条路（cap.media.download + cap.send.file）已经删掉了。
 import {
-  TOOL_TIMEOUT_MS,
-  POLL_RESERVE_MS,
   normalizeSettings,
   normalizeGatewayUrl,
   normalizeSongName,
   normalizeVoice,
   authHeaders,
-  mediaFileName,
-  parseJob,
   formatDuration,
-  resolveAudioUrl,
   describeError
 } from './lib.mjs';
 
@@ -160,31 +159,6 @@ async function callGatewayOnce(conf, baseUrl, pathname, { method = 'GET', body =
   return json;
 }
 
-/** 轮询任务直到完成或临近工具超时。 */
-async function waitForJob(conf, jobId, { onTick } = {}) {
-  const startedAt = Date.now();
-  const deadline = startedAt + TOOL_TIMEOUT_MS - POLL_RESERVE_MS;
-  let last = null;
-  while (Date.now() < deadline) {
-    const job = parseJob(await callGateway(conf, `/jobs/${encodeURIComponent(jobId)}`));
-    if (job.state === 'failed') {
-      throw Object.assign(new Error(job.message || '换声失败'), { code: 'E_JOB_FAILED' });
-    }
-    if (job.state === 'done') return job;
-    // parseJob 每次返回新对象，用 !== 比较恒为真 → 每 2 秒刷一条日志。
-    // 改成比较进度/消息，真的变了才回调。
-    const signature = `${job.state}|${job.progress}|${job.message || ''}`;
-    if (signature !== last) {
-      last = signature;
-      if (onTick) await onTick(job);
-    }
-    await sleep(conf.pollIntervalMs);
-  }
-  throw Object.assign(
-    new Error(`等换声超时（${Math.round((TOOL_TIMEOUT_MS - POLL_RESERVE_MS) / 1000)} 秒）：歌太长或电脑在忙，把 maxSeconds 调小再试`),
-    { code: 'E_JOB_TIMEOUT' }
-  );
-}
 
 // 插件不参与「语音条」那条链路（宿主直接打网关），所以设置里的秒数要主动推给网关。
 // 只在值变化时推一次；失败不影响主流程。
@@ -497,80 +471,6 @@ const tools = {
       note: items.length ? '' : '没搜到：换个关键词，或把歌手一起写上'
     };
   },
-
-  /** 点歌：搜 → 起任务 → 等换声 → 下载 → 发到当前群。 */
-  sing_song: async (args, context) => {
-    const chatKey = String(context?.chatKey ?? '');
-    if (!chatKey.startsWith('group:')) {
-      return {
-        ok: false,
-        error: '只能在群里点歌：宿主目前只允许插件把文件发到群聊（私聊会被拒绝）'
-      };
-    }
-    const conf = await loadConfig();
-    // 群文件输出默认关：关着就不碰 cap.send.file，直接让模型改用语音条那条路。
-    if (conf.allowFileOutput !== true) {
-      return {
-        ok: false,
-        error: '群文件输出未开启（插件设置里的「允许发群文件」是关的）。'
-          + '要发语音条请改调 send_voice，并把输入写成「唱：歌名」；确实需要文件请去设置里打开这个开关。'
-      };
-    }
-    await syncVoiceSeconds(conf);
-    const song = normalizeSongName(args?.song ?? args?.keyword);
-    const voice = normalizeVoice(args?.voice) || conf.defaultVoice;
-    const maxSeconds = Math.min(280, Math.max(5, Number(args?.maxSeconds) || conf.maxSeconds));
-
-    await log(`点歌：${song}${voice ? `（音色 ${voice}）` : ''}，上限 ${maxSeconds} 秒`);
-
-    const started = await callGateway(conf, '/sing', {
-      method: 'POST',
-      body: { song, voice, maxSeconds }
-    });
-    const jobId = String(started.jobId ?? '');
-    if (!jobId) throw Object.assign(new Error('网关没有返回 jobId'), { code: 'E_GATEWAY' });
-
-    const job = await waitForJob(conf, jobId, {
-      onTick: (current) => log(`换声进行中：${Math.round(current.progress * 100)}%`)
-    });
-
-    const audioUrl = resolveAudioUrl(conf.gatewayUrl, job.audioUrl);
-    if (!audioUrl) throw Object.assign(new Error('网关任务完成但没有给 audioUrl'), { code: 'E_GATEWAY' });
-
-    const ext = /\.(mp3|m4a|wav|ogg)$/i.exec(audioUrl)?.[1]?.toLowerCase() || 'mp3';
-    const fileName = mediaFileName(jobId, ext);
-    const downloaded = await callHost('cap.media.download', {
-      url: audioUrl,
-      name: fileName,
-      maxBytes: 64 * 1024 * 1024,
-      headers: authHeaders(conf.token)
-    });
-
-    const label = [job.title || song, job.artist].filter(Boolean).join(' - ');
-    await callHost('cap.send.file', {
-      chatKey,
-      file: downloaded?.file || fileName,
-      name: `${label || '点歌'}.${ext}`.replace(/[\\/:*?"<>|]/g, '_')
-    });
-    await log(`已发到 ${chatKey}：${label}（${Math.round((downloaded?.bytes || 0) / 1024)}KB）`);
-
-    return {
-      ok: true,
-      sent: true,
-      title: job.title || song,
-      artist: job.artist,
-      engine: job.engine,
-      voice: voice || '(网关默认)',
-      duration: formatDuration(job.seconds),
-      bytes: downloaded?.bytes || job.bytes || 0,
-      // 网关可能在原唱取不到音频时降级到翻唱版，或当前没接换声模型 —— 都要如实说
-      ...(job.note ? { note: job.note } : {}),
-      // engine=none 时发出去的是音源原声，必须说清，别让群里以为这是"她的翻唱"
-      ...(job.engine === 'none'
-        ? { note: '当前后端没接换声模型，发的是音源原声片段（不是翻唱）' }
-        : {})
-    };
-  }
 };
 
 

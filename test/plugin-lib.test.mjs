@@ -9,10 +9,7 @@ import {
   normalizeSongName,
   normalizeVoice,
   authHeaders,
-  mediaFileName,
-  parseJob,
-  formatDuration,
-  resolveAudioUrl
+  formatDuration
 } from '../plugin/sing/lib.mjs';
 
 test('joinUrl 不会产生双斜杠，也不会丢路径', () => {
@@ -49,7 +46,6 @@ test('内网判定覆盖常见私有段', () => {
 test('设置收敛：越界一律夹紧，缺字段退回默认', () => {
   const conf = normalizeSettings({ gatewayUrl: ' https://a.example.com/ ', maxSeconds: 999, pollIntervalMs: 50 });
   assert.equal(conf.gatewayUrl, 'https://a.example.com/');
-  assert.equal(conf.maxSeconds, 280);   // 群文件路径受插件工具 300s 超时限制
   assert.equal(conf.pollIntervalMs, 1000);
   assert.equal(conf.allowInsecureHttp, false);
 
@@ -73,31 +69,11 @@ test('请求头只在有 token 时带 Authorization', () => {
   assert.deepEqual(authHeaders('abc'), { authorization: 'Bearer abc' });
 });
 
-test('媒体文件名满足宿主 cap.media.download 的白名单正则', () => {
-  const name = mediaFileName('AbC123xyz', 'mp3');
-  assert.equal(name, 'sing-abc123xyz.mp3');
-  assert.match(name, /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/);
-  // 奇怪字符被剥掉，长度受控
-  assert.equal(mediaFileName('a/b:c*d?e', 'wav'), 'sing-abcde.wav');
-  assert.throws(() => mediaFileName('///', 'mp3'), /jobId 不可用/);
-  // 非法扩展名退回 mp3
-  assert.equal(mediaFileName('abc', 'exe!'), 'sing-abc.mp3');
-});
 
-test('任务状态：只认四种，其余按失败处理而不是假装在跑', () => {
-  assert.equal(parseJob({ state: 'done' }).state, 'done');
-  assert.equal(parseJob({ state: 'RUNNING', progress: 5 }).progress, 1);
-  const weird = parseJob({ state: '说不好' });
-  assert.equal(weird.state, 'failed');
-  assert.match(weird.message, /无法识别的任务状态/);
-});
 
-test('时长与音频地址拼接', () => {
+test('时长格式化', () => {
   assert.equal(formatDuration(0), '');
   assert.equal(formatDuration(45), '45 秒');
   assert.equal(formatDuration(63), '1 分 3 秒');
   assert.equal(formatDuration(120), '2 分');
-  assert.equal(resolveAudioUrl('https://g.example.com', '/files/a.mp3'), 'https://g.example.com/files/a.mp3');
-  assert.equal(resolveAudioUrl('https://g.example.com', 'https://cdn.example.com/a.mp3'), 'https://cdn.example.com/a.mp3');
-  assert.equal(resolveAudioUrl('https://g.example.com', ''), '');
 });

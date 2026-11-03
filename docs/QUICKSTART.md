@@ -76,7 +76,7 @@ powershell -ExecutionPolicy Bypass -File scripts\sync-host-url.ps1 -SshHost root
 # 1) 下权重（约 21 GB，逐文件直链见 draw-model/README.md 的「权重清单与下载地址」）
 #    DiT 13.25 GB + 文本编码器 7.17 GB + VAE 0.63 GB，全放 draw-model\weights\
 
-# 2) 起出图服务（7880，闲置 5 分钟自动卸载）
+# 2) 起出图服务（7880，闲置 3 分钟自动卸载；常驻加 -IdleSeconds 0）
 powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1
 
 # 3) 自检
@@ -89,9 +89,12 @@ curl.exe http://127.0.0.1:7880/health
 | 字段 | 填什么 |
 |---|---|
 | 允许机器人画图 | 打开 |
-| 服务地址 | `https://<你的服务器IP>:8898/v1`（走网关，带 GPU 仲裁）或 `http://127.0.0.1:7880/v1`（同机直连） |
+| 服务地址 | `https://<你的服务器IP>:8898/v1`（走网关，带 GPU 仲裁） |
 | 模型 | `qwen-image-2.1-turbo`（本地服务不看这个字段） |
 | API Key | 网关令牌 |
+
+> 控制台跑在服务器上，`127.0.0.1:7880` 指的是服务器自己、够不到你电脑上的出图服务；
+> 想直连自检就在你电脑上跑 `curl.exe http://127.0.0.1:7880/health`。
 
 然后在群里说「画一张 蓝色长发的小鲸鱼娘在海边」，收到图就通了。
 

@@ -1,7 +1,7 @@
 # 开发与测试
 
 ```bash
-node --test            # 52 个用例（5 个文件）：插件纯函数 / 网关队列 / 网关路由 / 情绪预设 / 真协议集成
+node --test            # 55 个用例（5 个文件）：插件纯函数 / 网关队列 / 网关路由 / 情绪预设 / 真协议集成
 node gateway/server.mjs
 
 # 宿主侧的验证工具（在 qq-agent-plus 仓库里跑）
@@ -17,7 +17,7 @@ node scripts/plugin-dev.mjs <本仓库>/plugin/sing --call sing_status
 
 | 工作流 | 触发 | 干什么 |
 |---|---|---|
-| `ci.yml` | push 到 main / PR / 手动 | 清单自检（`scripts/check-manifest.mjs`）+ 4 个测试文件 |
+| `ci.yml` | push 到 main / PR / 手动 | 清单自检（`scripts/check-manifest.mjs`）+ 5 个测试文件 |
 | `release.yml` | 推 `v*` 标签 / 手动（填版本号） | 拉宿主打包器 → 打包并**真装一次**自测 → 建 Release 挂包 |
 
 ### 发一个版本（推荐：打标签）
