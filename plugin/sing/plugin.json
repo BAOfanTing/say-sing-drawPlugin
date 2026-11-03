@@ -240,5 +240,11 @@
   "httpMaxBytes": 131072,
   "httpDomains": [
     "breezeblue.ai"
+  ],
+  "tags": [
+    "社区",
+    "语音",
+    "媒体",
+    "画图"
   ]
 }
