@@ -21,7 +21,7 @@
     DRAW_HOST=127.0.0.1
     DRAW_TOKEN=（留空则不校验）
     DRAW_WEIGHTS=<仓库>/draw-model/weights
-    DRAW_IDLE_SECONDS=180        闲置多少秒后卸载模型（0 = 常驻）
+    DRAW_IDLE_SECONDS=60         闲置多少秒后卸载模型（0 = 常驻；默认按需：用完一分钟就退）
     DRAW_SIZE=1024               默认边长
     DRAW_STEPS=（留空则用 Turbo 的 sample_sigmas）
 
@@ -57,7 +57,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 PORT = int(os.environ.get("DRAW_PORT", "7880"))
 HOST = os.environ.get("DRAW_HOST", "127.0.0.1")
 TOKEN = os.environ.get("DRAW_TOKEN", "").strip()
-IDLE_SECONDS = int(os.environ.get("DRAW_IDLE_SECONDS", "180"))
+IDLE_SECONDS = int(os.environ.get("DRAW_IDLE_SECONDS", "60"))
 DEFAULT_SIZE = int(os.environ.get("DRAW_SIZE", "1024"))
 DEFAULT_STEPS = os.environ.get("DRAW_STEPS", "").strip()
 
@@ -433,12 +433,12 @@ def generate(prompt: str, size: int, steps, seed=None,
 
 
 # ── HTTP ──────────────────────────────────────────────────
-def _run_with_timeout(timeout: float, fn):
+def _run_with_timeout(timeout: float, fn, on_timeout=None, grace: float = 20.0):
     """在后台线程里跑推理，最多等 timeout 秒。
 
-    超时就把错误抛给调用方（回 504），而**不**让 HTTP 线程被钉死在里面：
-    掉进 Windows 共享内存时一张图能跑十几分钟，服务会连 /health 都答不了，
-    网关那头看到的是"连接被掐"，宿主那头就是"画图没反应"。
+    超时后先调 `on_timeout()`（把管线的 `_interrupt` 置位，采样循环下一步就会停），
+    再给 grace 秒收尾；还停不下来就**整进程退出**（code 9）—— 与其留一个占着显存、
+    连 /health 都答不了的僵尸服务，不如让看门狗/计划任务拉起一个干净的。
     """
     if not timeout or timeout <= 0:
         return fn()
@@ -453,11 +453,36 @@ def _run_with_timeout(timeout: float, fn):
     th = threading.Thread(target=runner, name="draw-infer", daemon=True)
     th.start()
     th.join(timeout)
+    if th.is_alive() and on_timeout is not None:
+        try:
+            on_timeout()
+        except Exception:
+            pass
+        th.join(grace)
     if th.is_alive():
-        raise TimeoutError(f"单张超过 {timeout:.0f} 秒还没出来（多半是显存被别的程序占着，掉进共享内存了）")
+        log("⚠ 超时且中断无效：进程退出（code 9），等看门狗/计划任务拉起干净实例")
+        sys.stdout.flush()
+        os._exit(9)
     if "error" in box:
         raise box["error"]
-    return box["value"]
+    return box.get("value")
+
+
+class DrawServer(ThreadingHTTPServer):
+    """单实例守卫 + 别被 worker 拖住进程。
+
+    Windows 的 SO_REUSEADDR 语义和 Linux 不同：**第二个进程也能绑到同一个端口**，
+    于是"网关按需拉起 + 计划任务 + 看门狗"三方各自起一个，三个实例同时把 7-9 GB 模型搬上卡
+    （实测整卡 9.9/10.2 GB、100% 占用、/health 时通时不通）。这里关掉端口复用：
+    第二个实例会当场拿到 OSError，直接退出，绝不重复加载模型。
+    """
+    allow_reuse_address = False
+
+    def server_bind(self):
+        # 继承里默认会在 bind 前 setsockopt(SO_REUSEADDR)，Windows 上必须绕开
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -538,12 +563,22 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         steps = body.get("steps") or (DEFAULT_STEPS or None)
 
+        def _abort_render():
+            """让正在跑的采样循环自己收尾（diffusers 每步都会看 pipe._interrupt）。"""
+            pipe = _state.get("pipe")
+            if pipe is not None:
+                try:
+                    pipe._interrupt = True
+                except Exception:
+                    pass
+
         try:
             png = _run_with_timeout(
                 REQUEST_TIMEOUT,
                 lambda: generate(prompt, max(width, height), steps, body.get("seed"),
                                  ref_name=body.get("ref"),
                                  dims=(width, height) if width != height else None),
+                on_timeout=_abort_render,
             )
         except TimeoutError as exc:
             _state["last_error"] = str(exc)[:400]
@@ -573,7 +608,15 @@ def main() -> None:
         + (f"｜默认 {_default_ref()}" if refs else ""))
     if IMG2IMG:
         log("触发词：" + "、".join(TRIGGERS))
-    ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
+    try:
+        httpd = DrawServer((HOST, PORT), Handler)
+    except OSError as exc:
+        # 端口已被占：说明已经有一个出图服务在跑（网关按需拉起 / 计划任务 / 看门狗 都可能拉）
+        log(f"⚠ {HOST}:{PORT} 已被占用（{exc}）—— 已有实例在跑，本次不启动，直接退出")
+        log("  （重复的实例会各自加载 7-9 GB 模型，把 10 GB 卡撑爆，所以这里必须退出）")
+        sys.exit(0)                      # 退出码 0：别让看门狗把它当成崩溃反复拉起
+    log("✓ 单实例就绪，开始服务")
+    httpd.serve_forever()
 
 
 if __name__ == "__main__":

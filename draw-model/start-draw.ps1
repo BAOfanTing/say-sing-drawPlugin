@@ -2,13 +2,13 @@
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File draw\start-draw.ps1
-#   powershell -ExecutionPolicy Bypass -File draw\start-draw.ps1 -IdleSeconds 0     # 常驻不退
+#   powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1 -IdleSeconds 0  # 常驻不退
 #
 # 需要先有 draw-model\weights\ 下的权重（见 draw\README.md 的下载清单）。
 
 param(
   [int]$Port = 7880,
-  [int]$IdleSeconds = 180,
+  [int]$IdleSeconds = 60,
   [string]$Token = '',
   [string]$Python = ''
 )

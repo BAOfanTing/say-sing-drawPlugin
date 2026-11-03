@@ -231,8 +231,8 @@ cp config.example.json config.json
 | `voiceMessageMaxSeconds` | 语音条通道硬上限，默认 **600** 秒（插件推上来的值会被它夹紧） |
 | `voiceMessageDefaultSeconds` | 语音条默认时长，默认 90 秒（插件没推值时用它；0 = 整首由插件设置决定） |
 | `voice.segmentSeconds` | 长音频切段长度，默认 **30** 秒（整批只加载一次模型；设 0 = 不分段） |
-| `voice.serveCommand` | 常驻换声命令（`"<rvc的python>" "<仓库>/sing-model/run.py" --serve`）；留空 = 每次起进程 |
-| `voice.serveIdleMs` | 常驻进程空闲多久自动退出，默认 600000（10 分钟） |
+| `voice.serveCommand` | 常驻换声命令（`"<rvc的python>" "<仓库>/sing-model/run.py" --serve`）；`serveIdleMs > 0` 时才启用，留空 = 每次起进程 |
+| `voice.serveIdleMs` | 换声常驻策略：默认 **0 = 按需调用**（每首歌起进程、跑完即退）；填正数（毫秒，≥60000）才常驻 |
 | `voice.gpuFraction` | 常驻进程的显存上限比例，默认 0.9 |
 | `say.engine` | `auto`（默认，云端优先 + 本地兜底）/ `breeze`（只云端）/ `breeze-local`（只本地权重）/ `none`（关掉，只说文字） |
 | `say.breezeKey` / `say.voiceId` | Breeze API Key 与音色 id；**在插件设置里填更省事**（插件会推到网关） |

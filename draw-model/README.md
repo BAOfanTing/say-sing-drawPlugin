@@ -220,7 +220,7 @@ curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
 |---|---|---|
 | `DRAW_PORT` | 7880 | 监听端口（只绑 127.0.0.1） |
 | `DRAW_TOKEN` | 空 | 留空不校验；填了就要 `Authorization: Bearer` |
-| `DRAW_IDLE_SECONDS` | 180 | 闲置多久卸载模型（0 = 常驻） |
+| `DRAW_IDLE_SECONDS` | 60 | 闲置多久卸载模型（按需：出完一分钟就退，显存立刻还回去；0 = 常驻） |
 | `DRAW_SIZE` | 1024 | 默认边长（请求里 `size` 可覆盖） |
 | `DRAW_STEPS` | 空 | 留空用 Turbo 官方的 `sample_sigmas`（8 个断点）；填数字则覆盖 |
 | `DRAW_WEIGHTS` | `<仓库>/draw-model/weights` | 权重目录 |
