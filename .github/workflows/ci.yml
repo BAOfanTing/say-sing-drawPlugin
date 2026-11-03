@@ -22,11 +22,9 @@ jobs:
       - name: 清单基本校验
         run: node scripts/check-manifest.mjs plugin/sing
 
+      # 测试清单只有一份：package.json 的 test 脚本（node --test test/*.test.mjs）。
+      # 以前这里手写列文件，重构新增的 6 个测试（gpu-slot / managed-model / local-say /
+      # say-speech / draw-proxy / gateway-gpu-slot）一个都没进 CI，GPU 互斥这种核心正确性
+      # 只在本地验证过。以后加测试文件只改那一处。
       - name: 单元测试
-        run: |
-          node --test \
-            test/plugin-lib.test.mjs \
-            test/gateway-jobs.test.mjs \
-            test/gateway-app.test.mjs \
-            test/gateway-emotions.test.mjs \
-            test/plugin-protocol.test.mjs
+        run: npm test
