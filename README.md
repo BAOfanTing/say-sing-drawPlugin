@@ -122,7 +122,7 @@ RTX 3080 10G / Windows / v1.0.5：
 
 ## 插件设置
 
-控制台 → 插件 → 点歌唱歌：
+控制台 → 插件 → 说话·唱歌·画图：
 
 | 设置 | 默认 | 说明 |
 |---|---|---|
@@ -162,7 +162,8 @@ RTX 3080 10G / Windows / v1.0.5：
 | [docs/TUNING.md](docs/TUNING.md) | 唱歌时长四道闸、常驻换声、显存、历史踩坑、验收清单 |
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 运行期报错：说话没声音、宿主 524、文件 ENOENT、只有原声没换声、超时 |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | 插件 ↔ 网关 HTTP 契约（想用别的语言重写后端看这个） |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 本地跑测试、代码结构 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 本地跑测试、代码结构、打包发版 |
+| [CHANGELOG.md](CHANGELOG.md) | 每个版本做了什么（Release 正文就从这里抽） |
 | [docs/DRAW.md](docs/DRAW.md) | 本地画图：实测数据、显存账、踩坑、接入步骤 |
 
 ## License

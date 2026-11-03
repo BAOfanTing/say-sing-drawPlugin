@@ -1,12 +1,15 @@
 #!/usr/bin/env node
-// 生成 GitHub Release 正文：安装说明 + 该版本相对上一版的提交列表 + compare 链接。
+// 生成 GitHub Release 正文：该版本的变更内容 + 安装说明 + compare 链接。
 //
 // 用法：
-//   node scripts/release-notes.mjs 1.0.5 --sha256 <hex> --file sing-1.0.5.tar.gz > body.md
+//   node scripts/release-notes.mjs 1.0.6 --sha256 <hex> --file sing-1.0.6.tar.gz > body.md
 //
-// 说明：正文来自 **git 提交历史**（不再维护 CHANGELOG.md）：
-//   从上一个 tag 到当前 tag 之间的 commit，按 feat / fix / 其它分组列出。
+// 正文来源（按优先级）：
+//   1. `CHANGELOG.md` 里 `## [x.y.z] - 日期` 那一节 —— 正常发版都走这条；
+//   2. 没有对应小节时，回落到「上一版 tag 到本 tag 的提交列表」（按 feat / fix / 其它分组）。
+// 标题格式别改：`## [x.y.z]`（发布工作流按它抽取）。
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 
 const root = path.join(import.meta.dirname, '..');
@@ -31,30 +34,55 @@ const git = (...argv) => {
   }
 };
 
-// 找上一个 tag（排除当前版本）
-const tags = git('tag', '--sort=-v:refname').split('\n').filter(Boolean);
-const previous = tags.find((tag) => tag.replace(/^v/, '') !== version) || '';
-const range = previous ? `${previous}..v${version}` : `v${version}`;
-
-const raw = git('log', '--no-merges', '--pretty=format:%h%x09%s', range);
-const lines = raw ? raw.split('\n').filter(Boolean) : [];
-
-const groups = { feat: [], fix: [], other: [] };
-for (const line of lines) {
-  const [hash, ...rest] = line.split('\t');
-  const subject = rest.join('\t').trim();
-  if (!subject) continue;
-  const item = `- ${subject}（\`${hash}\`）`;
-  if (/^feat(\(|:)/i.test(subject)) groups.feat.push(item);
-  else if (/^fix(\(|:)/i.test(subject)) groups.fix.push(item);
-  else groups.other.push(item);
+/** 从 CHANGELOG.md 抽 `## [x.y.z]` 到下一个 `## [` 之间的内容。 */
+function changelogSection(ver) {
+  let text = '';
+  try {
+    text = readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+  } catch {
+    return '';
+  }
+  const lines = text.split(/\r?\n/);
+  const start = lines.findIndex((l) => new RegExp(`^##\\s*\\[${ver.replace(/\./g, '\\.')}\\]`).test(l));
+  if (start < 0) return '';
+  const body = [];
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^##\s/.test(lines[i])) break;
+    body.push(lines[i]);
+  }
+  return body.join('\n').replace(/^-{3,}\s*$/gm, '').trim();
 }
 
-const parts = [`## v${version}`, ''];
-if (groups.feat.length) parts.push('### 新增', ...groups.feat, '');
-if (groups.fix.length) parts.push('### 修复', ...groups.fix, '');
-if (groups.other.length) parts.push('### 其它', ...groups.other, '');
-if (!lines.length) parts.push('（这个版本没有可列出的提交）', '');
+const fromChangelog = changelogSection(version);
+
+// 上一个 tag（排除当前版本），用于 compare 链接 / 提交列表回落
+const tags = git('tag', '--sort=-v:refname').split('\n').filter(Boolean);
+const previous = tags.find((t) => t.replace(/^v/, '') !== version) || '';
+
+let body = fromChangelog;
+if (!body) {
+  const range = previous ? `${previous}..v${version}` : `v${version}`;
+  const raw = git('log', '--no-merges', '--pretty=format:%h%x09%s', range);
+  const lines = raw ? raw.split('\n').filter(Boolean) : [];
+  const groups = { feat: [], fix: [], other: [] };
+  for (const line of lines) {
+    const [hash, ...rest] = line.split('\t');
+    const subject = rest.join('\t').trim();
+    if (!subject) continue;
+    const item = `- ${subject}（\`${hash}\`）`;
+    if (/^feat(\(|:)/i.test(subject)) groups.feat.push(item);
+    else if (/^fix(\(|:)/i.test(subject)) groups.fix.push(item);
+    else groups.other.push(item);
+  }
+  const parts = [];
+  if (groups.feat.length) parts.push('### 新增', ...groups.feat, '');
+  if (groups.fix.length) parts.push('### 修复', ...groups.fix, '');
+  if (groups.other.length) parts.push('### 其它', ...groups.other, '');
+  body = parts.length ? parts.join('\n').trim() : '（这个版本没有可列出的变更）';
+  console.error(`⚠ CHANGELOG.md 里没有 ${version} 一节，正文改用提交列表`);
+}
+
+const parts = [`## v${version}`, '', body, ''];
 
 parts.push(
   '## 安装',

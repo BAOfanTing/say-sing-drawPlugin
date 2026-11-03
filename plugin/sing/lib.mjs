@@ -32,7 +32,7 @@ export function joinUrl(base, pathname) {
  */
 export function normalizeGatewayUrl(raw, { allowInsecureHttp = false } = {}) {
   const text = String(raw ?? '').trim();
-  if (!text) throw new Error('没有配置网关地址：控制台 → 插件 → 点歌唱歌 → 「网关地址」');
+  if (!text) throw new Error('没有配置网关地址：控制台 → 插件 → 说话·唱歌·画图 → 「网关地址」');
   let url;
   try { url = new URL(text); } catch { throw new Error(`网关地址不是合法 URL：${text}`); }
   if (url.protocol !== 'https:' && !(allowInsecureHttp && url.protocol === 'http:')) {

@@ -1,4 +1,4 @@
-// 点歌唱歌：qq-agent 插件入口（apiVersion 2）。
+// 说话·唱歌·画图：qq-agent 插件入口（apiVersion 2）。
 //
 // 这里只做一件事：把 stdin/stdout 上的 NDJSON 协议接起来，给模型几个查询工具
 // （点歌搜索、后端状态、说话音色、额度领取、网易云登录）。
@@ -118,7 +118,7 @@ function gatewayCandidates(conf) {
 
 async function callGateway(conf, pathname, { method = 'GET', body = null, query = null } = {}) {
   const candidates = gatewayCandidates(conf);
-  if (!candidates.length) throw new Error('没有配置网关地址：控制台 → 插件 → 点歌唱歌 → 「网关地址」');
+  if (!candidates.length) throw new Error('没有配置网关地址：控制台 → 插件 → 说话·唱歌·画图 → 「网关地址」');
   let lastNetworkError = null;
   for (const candidate of candidates) {
     try {
@@ -241,7 +241,7 @@ function cookieFromSetCookies(list) {
 
 async function breezeLogin(conf) {
   if (!conf.breezeEmail || !conf.breezePassword) {
-    throw new Error('还没填 Breeze 账号邮箱/密码：控制台 → 插件 → 点歌唱歌 → 「云端额度」');
+    throw new Error('还没填 Breeze 账号邮箱/密码：控制台 → 插件 → 说话·唱歌·画图 → 「云端额度」');
   }
   const res = await breezeRequest('/api/auth/email/continue', {
     method: 'POST',

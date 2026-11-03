@@ -1,8 +1,8 @@
 {
   "name": "say-sing-draw-plugin",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "private": true,
-  "description": "QQ Agent 的说话 / 点歌唱歌（含本地画图）插件 + 本机后端网关（插件是薄客户端，重活在你自己的电脑上跑）",
+  "description": "QQ Agent 的说话 / 唱歌 / 画图插件 + 本机后端网关（插件是薄客户端，重活在你自己的电脑上跑）",
   "type": "module",
   "engines": {
     "node": ">=22.19.0"

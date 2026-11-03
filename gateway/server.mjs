@@ -69,7 +69,7 @@ server.listen(config.port, config.host, () => {
   console.log(`  转码：${config.transcode}`);
   console.log(`  鉴权：${config.token ? '已开启（Bearer token）' : '⚠ 未设置 token，任何能访问到本端口的人都能点歌'}`);
   console.log(`  数据：${config.dataDir}`);
-  console.log('对外的 https 地址用隧道拿到后，填进 QQ Agent → 插件 → 点歌唱歌 → 网关地址。');
+  console.log('对外的 https 地址用隧道拿到后，填进 QQ Agent → 插件 → 说话·唱歌·画图 → 网关地址。');
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

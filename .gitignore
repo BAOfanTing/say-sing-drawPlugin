@@ -72,3 +72,6 @@ draw-model/downloads/
 draw-model/.venv/
 draw-model/tmp/
 draw-model/*.crdownload
+
+# 打包产物（发版工作流自己生成，不进仓库）
+dist/

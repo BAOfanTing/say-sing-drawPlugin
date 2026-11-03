@@ -73,6 +73,7 @@ jobs:
             test/plugin-lib.test.mjs \
             test/gateway-jobs.test.mjs \
             test/gateway-app.test.mjs \
+            test/gateway-emotions.test.mjs \
             test/plugin-protocol.test.mjs
 
       - name: 拉宿主打包器
@@ -108,7 +109,8 @@ jobs:
           "
 
       - name: 生成 Release 正文
-        # 正文 = 上一版 tag 到本 tag 之间的提交列表 + 安装说明 + compare 链接
+        # 正文 = CHANGELOG.md 里该版本那一节 + 安装说明 + compare 链接
+        # （没有该小节时 scripts/release-notes.mjs 会回落到提交列表）
         # （以前把 body 写死成"安装"一段，generate_release_notes 又被 body 覆盖，
         #   Release 页只剩安装说明，用户看不到这个版本做了什么）
         run: |
