@@ -598,6 +598,80 @@ class Handler(BaseHTTPRequestHandler):
         })
 
 
+def _pid_alive(pid: int) -> bool:
+    """判断 PID 是否还活着 —— 只探测，绝不发信号。
+
+    ⚠️ 不能用 `os.kill(pid, 0)`：在 Windows 上 CPython 的 os.kill 对任何非 CTRL_* 的
+    sig 都会调 TerminateProcess —— 传 0 等于**直接杀掉对方**（文档原话：any other value
+    for sig will cause the process to be unconditionally killed）。那会把正在跑的出图服务弄死。
+    Windows 走 OpenProcess + GetExitCodeProcess；其它平台才用 kill(pid, 0)。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                    return False
+                return code.value == STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except OSError:
+        return False
+    except Exception:
+        return False
+
+
+def _acquire_pid_lock() -> str:
+    """单实例守卫的第二道保险：PID 文件。
+
+    端口守卫（allow_reuse_address=False）能挡住"同一个端口被绑两次"，但有漏网：
+      · 服务卡死到连监听都不应答（端口还在、连接全挂）→ 新实例照样能起，两个一起吃显存；
+      · 端口被别的程序占着 → 我们绑不上，却只会说"已有实例在跑"，误导排查。
+    所以再加一层"进程级"判断：PID 文件里的进程还活着就退出；陈旧（进程已不在）就覆盖。
+    """
+    pid_file = os.environ.get("DRAW_PID_FILE") or os.path.join(_HERE, "logs", "draw-service.pid")
+    try:
+        os.makedirs(os.path.dirname(pid_file), exist_ok=True)
+        if os.path.exists(pid_file):
+            try:
+                with open(pid_file, encoding="utf-8") as fh:
+                    old = int(str(fh.read()).strip() or 0)
+            except Exception:
+                old = 0
+            if old and old != os.getpid() and _pid_alive(old):
+                log(f"⚠ 已有出图服务在跑（PID {old}，锁文件 {pid_file}）—— 本次不启动，直接退出")
+                log("  （两个实例会各自加载 7-9 GB 模型，把 10 GB 卡撑爆）")
+                sys.exit(0)
+            if old:
+                log(f"清理陈旧的 PID 文件（旧 PID {old} 已不在）")
+        with open(pid_file, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+        return pid_file
+    except SystemExit:
+        raise
+    except Exception as exc:
+        # 锁本身出问题不该挡住服务：端口守卫还在
+        log(f"⚠ PID 锁写入失败（{exc}），只靠端口守卫")
+        return ""
+
+
 def main() -> None:
     log(f"权重目录 {WEIGHTS}")
     log(f"听 {HOST}:{PORT}｜鉴权 {'开' if TOKEN else '关'}｜闲置退出 {IDLE_SECONDS or '常驻'}s")
@@ -608,15 +682,26 @@ def main() -> None:
         + (f"｜默认 {_default_ref()}" if refs else ""))
     if IMG2IMG:
         log("触发词：" + "、".join(TRIGGERS))
+    pid_file = _acquire_pid_lock()
     try:
-        httpd = DrawServer((HOST, PORT), Handler)
-    except OSError as exc:
-        # 端口已被占：说明已经有一个出图服务在跑（网关按需拉起 / 计划任务 / 看门狗 都可能拉）
-        log(f"⚠ {HOST}:{PORT} 已被占用（{exc}）—— 已有实例在跑，本次不启动，直接退出")
-        log("  （重复的实例会各自加载 7-9 GB 模型，把 10 GB 卡撑爆，所以这里必须退出）")
-        sys.exit(0)                      # 退出码 0：别让看门狗把它当成崩溃反复拉起
-    log("✓ 单实例就绪，开始服务")
-    httpd.serve_forever()
+        try:
+            httpd = DrawServer((HOST, PORT), Handler)
+        except OSError as exc:
+            # 端口已被占：说明已经有一个出图服务在跑（网关按需拉起 / 计划任务 / 看门狗 都可能拉）
+            log(f"⚠ {HOST}:{PORT} 已被占用（{exc}）—— 已有实例在跑，本次不启动，直接退出")
+            log("  （重复的实例会各自加载 7-9 GB 模型，把 10 GB 卡撑爆，所以这里必须退出）")
+            sys.exit(0)                      # 退出码 0：别让看门狗把它当成崩溃反复拉起
+        log("✓ 单实例就绪，开始服务")
+        httpd.serve_forever()
+    finally:
+        # 正常/异常退出都清掉自己的锁（被别人强杀时留下的由下次启动判断陈旧）
+        if pid_file:
+            try:
+                with open(pid_file, encoding="utf-8") as fh:
+                    if str(fh.read()).strip() == str(os.getpid()):
+                        os.remove(pid_file)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
