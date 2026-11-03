@@ -12,6 +12,7 @@ import { parseEmotionTag, resolveEmotionKey, emotionInstruction, emotionList } f
 import { createSayEngine } from './say.mjs';
 import { createGpuSlot } from './gpu-slot.mjs';
 import { createManagedModel } from './managed-model.mjs';
+import { createDrawProxy } from './draw-proxy.mjs';
 
 export const VERSION = '1.0.5';
 const WEB_DIR = path.join(import.meta.dirname, '..', 'web');
@@ -720,43 +721,12 @@ export function createApp({
   // 出图服务是"懒加载 + 闲置 300 秒退出"的：闲置后进程会没，下一次请求必须有人把它拉起来。
   // 以前靠一个每 5 分钟跑一次的看门狗兜，副作用是**每分钟级别的窗口闪一下**，还在跟闲置退出互相打架。
   // 现在改成按需拉起：连不上就先起进程，等 /health 通了再转发。
-  const drawModel = createManagedModel({
-    name: 'draw',
-    idleMs: Number(config.draw?.idleMs) || 0,       // 出图服务自己闲着会退，这里不再重复计时
-    startTimeoutMs: Number(config.draw?.startTimeoutMs) || 180000,
-    pollMs: 2000,
-    now,
-    log: (m) => console.log(m),
-    health: async () => {
-      if (!config.draw?.url) return false;
-      const r = await fetch(`${String(config.draw.url).replace(/\/$/, '')}/health`, {
-        signal: AbortSignal.timeout(2500)
-      });
-      return r.ok;
-    },
-    start: async () => {
-      const command = String(config.draw?.startCommand || '').trim();
-      if (!command) {
-        console.warn('[draw] 后端没起，且没配 draw.startCommand —— 只能靠你自己手动启动');
-        return false;
-      }
-      console.log('[draw] 后端没起，按需启动…');
-      const child = spawn(command, {
-        shell: true,
-        windowsHide: true,
-        detached: true,
-        stdio: 'ignore',
-        env: {
-          ...process.env,
-          TEMP: path.join(config.dataDir || '.', 'tmp'),
-          TMP: path.join(config.dataDir || '.', 'tmp')
-        }
-      });
-      child.unref();
-      return true;
-    }
+  // 出图代理：按需拉起 + GPU 槽 + 转发抗抖，整段在 lib/draw-proxy.mjs 里
+  const drawProxy = createDrawProxy({
+    config,
+    gpu: gpuSlot,
+    yieldLocalSay: () => yieldLocalSay()
   });
-  const ensureDrawUp = ({ force = false } = {}) => drawModel.ensure({ force });
 
   async function handleSay(req, res, text, options = {}) {
     const startedAt = Date.now();
@@ -913,47 +883,17 @@ export function createApp({
     // 宿主控制台的「图片生成 → 服务地址」可以直接指向本网关，也可以指向 draw 服务本身；
     // 走网关的好处是能拿到统一的 GPU 仲裁（唱歌/说话在跑时排队），并复用网关令牌。
     if ((pathname === '/v1/images/generations' || pathname === '/images/generations') && req.method === 'POST') {
-      // 出图服务可能没起、可能卡在共享内存里、也可能把连接直接掐了。
-      // 这些都必须在这条路由里就地变成 502 —— 之前没兜住：fetch 抛错变成未捕获拒绝，
-      // **整个网关进程跟着退出**（宿主看到的就是"画图没反应"，连唱歌/说话一起哑掉）。
+      // 出图服务可能没起、可能卡在共享内存里、也可能把连接直接掐了 —— 这些都必须就地变成 502，
+      // 不能变成未捕获拒绝（那会让整个网关退出，连唱歌/说话一起哑掉）。
+      // 拉起/占槽/重试的细节在 lib/draw-proxy.mjs，这里只管收发。
       try {
-        if (!config.draw?.url) {
-          throw Object.assign(new Error('画图后端没配置（draw.url），见 docs/DRAW.md'), { code: 'E_DRAW_OFF' });
-        }
         const raw = await readRawBody(req);
-        const headers = { 'content-type': 'application/json' };
-        if (config.draw.token) headers.authorization = `Bearer ${config.draw.token}`;
-        const target = `${String(config.draw.url).replace(/\/$/, '')}/v1/images/generations`;
-        // 整段都在 GPU 槽里：① 先让本地 TTS 把显存交出来；② 唱歌在跑就排队（等它把槽位还回来）；
-        // ③ 出图服务闲置会退出，连不上就先拉起来；④ 转发（中途被掐断再试一次）。
-        // 以前这里是"等 activeSingJobs 归零"，但等完之后转发期间不占任何槽位 ——
-        // 唱歌随时能插进来，和画图一起挤爆 10 GB。现在排队即互斥。
-        const text = await gpuSlot.run('draw', async () => {
-          await yieldLocalSay();
-          await ensureDrawUp();
-          let response;
-          try {
-            response = await fetch(target, {
-              method: 'POST', headers, body: raw,
-              signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
-            });
-          } catch (error) {
-            // 拉起来之后又被掐断（比如刚启动就 OOM）→ 再试一次，仍失败就交给外层报 502
-            console.warn(`[draw] 首次转发失败（${String(error?.message ?? error).slice(0, 80)}），重试一次`);
-            await ensureDrawUp({ force: true });
-            response = await fetch(target, {
-              method: 'POST', headers, body: raw,
-              signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
-            });
-          }
-          console.log(`[draw] → ${target} ${response.status}`);
-          return { status: response.status, body: await response.text(), contentType: response.headers.get('content-type') };
+        const out = await drawProxy.forward(raw);
+        res.writeHead(out.status, {
+          'content-type': out.contentType || 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(out.body)
         });
-        res.writeHead(text.status, {
-          'content-type': text.contentType || 'application/json; charset=utf-8',
-          'content-length': Buffer.byteLength(text.body)
-        });
-        res.end(text.body);
+        res.end(out.body);
         return;
       } catch (error) {
         const message = `画图后端不可用：${String(error?.message ?? error).slice(0, 200)}`;
@@ -981,7 +921,7 @@ export function createApp({
         voiceResidentMs: Number(voice.residentIdleMs) || 0,
         // 谁现在占着 GPU、还有几个在排队（三个租户共享一个槽位，见 gpu-slot.mjs）
         gpu: { owner: gpuSlot.owner(), waiting: gpuSlot.waiting(), ...gpuSlot.stats() },
-        models: { localSay: localSayModel.status(), draw: drawModel.status() },
+        models: { localSay: localSayModel.status(), draw: drawProxy.status() },
         source: source.type,
         neteaseCookie: typeof source.hasCookie === 'function' ? source.hasCookie() : Boolean(config.source.neteaseCookie),
         voiceSeconds: runtimeVoiceSeconds ?? (config.voiceMessageDefaultSeconds ?? 90),
@@ -1294,5 +1234,5 @@ export function createApp({
     }
   };
 
-  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say, gpu: gpuSlot };
+  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say, gpu: gpuSlot, draw: drawProxy };
 }
