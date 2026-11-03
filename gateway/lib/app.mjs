@@ -11,6 +11,7 @@ import { transcodeTo, probeSeconds, shiftPitch, concatAudio, runProcess, applyFi
 import { parseEmotionTag, resolveEmotionKey, emotionInstruction, emotionList } from './emotions.mjs';
 import { createSayEngine } from './say.mjs';
 import { createGpuSlot } from './gpu-slot.mjs';
+import { createManagedModel } from './managed-model.mjs';
 
 export const VERSION = '1.0.5';
 const WEB_DIR = path.join(import.meta.dirname, '..', 'web');
@@ -449,100 +450,85 @@ export function createApp({
     return { removed, bytes };
   };
 
-  // ── 本地 TTS 进程管理 ────────────────────────────────────
+  // ── 本地 TTS 进程管理（走统一的 ManagedModel）────────────
   // 由网关自己起/停 python —— 不经过 PowerShell：脚本里的 Invoke-WebRequest 轮询
   // 在被网关拉起时会被宿主沙箱挡住，导致白等 360 秒（2026-10-31 实测 440 秒/句）。
   let localChild = null;
+  let localAlive = false;          // start() 之后进程是否还活着（给 ManagedModel 判"早退"）
   const localSayPort = (() => {
     try { return new URL(config.say.localUrl || 'http://127.0.0.1:7860').port || '7860'; } catch { return '7860'; }
   })();
 
-  const localHealthOk = async () => {
-    try {
-      const response = await fetch(`http://127.0.0.1:${localSayPort}/health`, { signal: AbortSignal.timeout(3000) });
-      return response.ok;
-    } catch { return false; }
+  const localHealthOkRaw = async () => {
+    const response = await fetch(`http://127.0.0.1:${localSayPort}/health`, { signal: AbortSignal.timeout(3000) });
+    return response.ok;
   };
 
-  /** 起本地 Breeze（若已在跑就跳过），等到 /health 通才算成功。 */
-  const startLocalSay = async ({ waitMs = 240000 } = {}) => {
-    if (localChild && localChild.exitCode === null) return true;
-    if (await localHealthOk()) return true;           // 别人起的也在用
-    const python = String(config.say.localPython || '').trim();
-    const modelDir = String(config.say.localModelDir || '').trim();
-    if (!python || !modelDir) {
-      // 没配内置管理就退回用户给的命令
-      if (!config.say.localStartCmd) return false;
-      return await runShell(config.say.localStartCmd, waitMs);
-    }
-    // say-model 根目录（PYTHONPATH 要它）：优先用显式配置，否则从 .../weights/<名字> 反推
-    const root = String(config.say.localAppDir || '').trim()
-      || modelDir.replace(/[\\/]weights[\\/].*$/i, '');
-    console.log(`[say] 启动本地 Breeze：${python}（端口 ${localSayPort}）`);
-    localChild = spawn(python, ['-m', 'breeze_infer.api', modelDir, '--host', '127.0.0.1', '--port', localSayPort], {
-      cwd: root,
-      windowsHide: true,
-      env: { ...process.env, PYTHONPATH: root, PYTHONIOENCODING: 'utf-8', TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER: '0' }
-    });
-    localChild.stderr?.on('data', (chunk) => {
-      const text = chunk.toString('utf8').trim();
-      if (text) console.log(`[say-local] ${text.slice(-300)}`);
-    });
-    localChild.on('close', (code) => {
-      console.log(`[say] 本地 Breeze 进程退出（code=${code}）`);
-      localChild = null;
-    });
-
-    const deadline = Date.now() + waitMs;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-      if (localChild === null) return false;          // 启动即崩
-      if (await localHealthOk()) {
-        console.log('[say] 本地 Breeze 就绪');
-        return true;
+  const localSayModel = createManagedModel({
+    name: 'local-say',
+    idleMs: Number(config.say.localIdleMs) || 0,
+    startTimeoutMs: 240000,
+    pollMs: 1000,
+    now,
+    log: (m) => console.log(m),
+    health: localHealthOkRaw,
+    isDead: () => localAlive === false,
+    /** 只负责"拉起来"；等就绪的轮询由 ManagedModel 统一做。 */
+    start: async () => {
+      const python = String(config.say.localPython || '').trim();
+      const modelDir = String(config.say.localModelDir || '').trim();
+      if (!python || !modelDir) {
+        // 没配内置管理就退回用户给的命令
+        if (!config.say.localStartCmd) return false;
+        const ok = await runShell(config.say.localStartCmd, 240000);
+        localAlive = ok;
+        return ok;
+      }
+      // say-model 根目录（PYTHONPATH 要它）：优先用显式配置，否则从 .../weights/<名字> 反推
+      const root = String(config.say.localAppDir || '').trim()
+        || modelDir.replace(/[\\/]weights[\\/].*$/i, '');
+      console.log(`[say] 启动本地 Breeze：${python}（端口 ${localSayPort}）`);
+      localChild = spawn(python, ['-m', 'breeze_infer.api', modelDir, '--host', '127.0.0.1', '--port', localSayPort], {
+        cwd: root,
+        windowsHide: true,
+        env: { ...process.env, PYTHONPATH: root, PYTHONIOENCODING: 'utf-8', TORCHINDUCTOR_USE_STATIC_CUDA_LAUNCHER: '0' }
+      });
+      localAlive = true;
+      localChild.stderr?.on('data', (chunk) => {
+        const text = chunk.toString('utf8').trim();
+        if (text) console.log(`[say-local] ${text.slice(-300)}`);
+      });
+      localChild.on('close', (code) => {
+        console.log(`[say] 本地 Breeze 进程退出（code=${code}）`);
+        localChild = null;
+        localAlive = false;
+      });
+      return true;
+    },
+    stop: async () => {
+      localAlive = false;
+      if (localChild && localChild.pid) {
+        if (process.platform === 'win32') {
+          try { spawn('taskkill', ['/T', '/F', '/PID', String(localChild.pid)], { windowsHide: true }); } catch { /* 忽略 */ }
+        }
+        try { localChild.kill('SIGKILL'); } catch { /* 忽略 */ }
+        localChild = null;
+      }
+      if (config.say.localStopCmd) await runShell(config.say.localStopCmd, 60000);
+      // 等显存真的释放（torch 退出到驱动回收有延迟）
+      for (let i = 0; i < 10; i += 1) {
+        if (!(await localHealthOkRaw())) break;
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
     }
-    console.warn('[say] 本地 Breeze 等待就绪超时');
-    return false;
-  };
+  });
 
-  // 闲置自动退出：本地模型常驻要吃 8.2 GB，不能白占着显卡。
-  // 每说完一句就重置计时器，超时就把进程杀掉；下次说话时再拉起（加载约 8 秒）。
-  let localIdleTimer = null;
-  const clearLocalIdle = () => {
-    if (localIdleTimer) { clearTimeout(localIdleTimer); localIdleTimer = null; }
-  };
-  const armLocalIdle = () => {
-    clearLocalIdle();
-    const idleMs = Number(config.say.localIdleMs) || 0;
-    if (idleMs <= 0) return;                          // 0 = 常驻不退
-    localIdleTimer = setTimeout(async () => {
-      localIdleTimer = null;
-      if (!localChild) return;
-      console.log(`[say] 本地 TTS 闲置 ${Math.round(idleMs / 1000)} 秒，退出并释放显存`);
-      await stopLocalSay();
-      localSayStopped = true;
-    }, idleMs);
-    localIdleTimer.unref?.();
-  };
-
-  /** 停本地 Breeze，把显存腾出来。 */
-  const stopLocalSay = async () => {
-    clearLocalIdle();
-    if (localChild && localChild.pid) {
-      if (process.platform === 'win32') {
-        try { spawn('taskkill', ['/T', '/F', '/PID', String(localChild.pid)], { windowsHide: true }); } catch { /* 忽略 */ }
-      }
-      try { localChild.kill('SIGKILL'); } catch { /* 忽略 */ }
-      localChild = null;
-    }
-    if (config.say.localStopCmd) await runShell(config.say.localStopCmd, 60000);
-    // 等显存真的释放（torch 退出到驱动回收有延迟）
-    for (let i = 0; i < 10; i += 1) {
-      if (!(await localHealthOk())) break;
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  };
+  // 旧名字保留成薄封装：调用点（yield/resume/handleSay）不用改，语义到了壳里
+  const localHealthOk = () => localSayModel.healthy();
+  const startLocalSay = () => localSayModel.ensure();
+  const stopLocalSay = () => localSayModel.shutdown('让位或闲置');
+  const clearLocalIdle = () => localSayModel.cancelIdle();
+  const armLocalIdle = () => localSayModel.armIdle();
 
   // ── 本地 TTS 让位 ────────────────────────────────────────
   // 本地 Breeze eager 要吃 8.4 GB：驻留时唱歌会从 10 秒变 51 秒（显存挤占）。
@@ -734,60 +720,43 @@ export function createApp({
   // 出图服务是"懒加载 + 闲置 300 秒退出"的：闲置后进程会没，下一次请求必须有人把它拉起来。
   // 以前靠一个每 5 分钟跑一次的看门狗兜，副作用是**每分钟级别的窗口闪一下**，还在跟闲置退出互相打架。
   // 现在改成按需拉起：连不上就先起进程，等 /health 通了再转发。
-  let drawStarting = null;
-  async function drawHealthy(timeoutMs = 2500) {
-    if (!config.draw?.url) return false;
-    try {
+  const drawModel = createManagedModel({
+    name: 'draw',
+    idleMs: Number(config.draw?.idleMs) || 0,       // 出图服务自己闲着会退，这里不再重复计时
+    startTimeoutMs: Number(config.draw?.startTimeoutMs) || 180000,
+    pollMs: 2000,
+    now,
+    log: (m) => console.log(m),
+    health: async () => {
+      if (!config.draw?.url) return false;
       const r = await fetch(`${String(config.draw.url).replace(/\/$/, '')}/health`, {
-        signal: AbortSignal.timeout(timeoutMs)
+        signal: AbortSignal.timeout(2500)
       });
       return r.ok;
-    } catch {
-      return false;
-    }
-  }
-  async function ensureDrawUp({ force = false } = {}) {
-    if (!force && await drawHealthy()) return true;
-    const command = String(config.draw?.startCommand || '').trim();
-    if (!command) {
-      console.warn('[draw] 后端没起，且没配 draw.startCommand —— 只能靠你自己手动启动');
-      return false;
-    }
-    if (drawStarting) return drawStarting;
-    drawStarting = (async () => {
-      try {
-        console.log('[draw] 后端没起，按需启动…');
-        const child = spawn(command, {
-          shell: true,
-          windowsHide: true,
-          detached: true,
-          stdio: 'ignore',
-          env: {
-            ...process.env,
-            TEMP: path.join(config.dataDir || '.', 'tmp'),
-            TMP: path.join(config.dataDir || '.', 'tmp')
-          }
-        });
-        child.unref();
-        const deadline = Date.now() + (Number(config.draw?.startTimeoutMs) || 180000);
-        while (Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 2000));
-          if (await drawHealthy(1500)) {
-            console.log('[draw] ✓ 后端已就绪');
-            return true;
-          }
-        }
-        console.warn('[draw] ✗ 启动超时（看 draw-model/logs/draw-service.err.log）');
+    },
+    start: async () => {
+      const command = String(config.draw?.startCommand || '').trim();
+      if (!command) {
+        console.warn('[draw] 后端没起，且没配 draw.startCommand —— 只能靠你自己手动启动');
         return false;
-      } catch (error) {
-        console.warn(`[draw] ✗ 启动失败：${String(error?.message ?? error).slice(0, 120)}`);
-        return false;
-      } finally {
-        drawStarting = null;
       }
-    })();
-    return drawStarting;
-  }
+      console.log('[draw] 后端没起，按需启动…');
+      const child = spawn(command, {
+        shell: true,
+        windowsHide: true,
+        detached: true,
+        stdio: 'ignore',
+        env: {
+          ...process.env,
+          TEMP: path.join(config.dataDir || '.', 'tmp'),
+          TMP: path.join(config.dataDir || '.', 'tmp')
+        }
+      });
+      child.unref();
+      return true;
+    }
+  });
+  const ensureDrawUp = ({ force = false } = {}) => drawModel.ensure({ force });
 
   async function handleSay(req, res, text, options = {}) {
     const startedAt = Date.now();
@@ -1012,6 +981,7 @@ export function createApp({
         voiceResidentMs: Number(voice.residentIdleMs) || 0,
         // 谁现在占着 GPU、还有几个在排队（三个租户共享一个槽位，见 gpu-slot.mjs）
         gpu: { owner: gpuSlot.owner(), waiting: gpuSlot.waiting(), ...gpuSlot.stats() },
+        models: { localSay: localSayModel.status(), draw: drawModel.status() },
         source: source.type,
         neteaseCookie: typeof source.hasCookie === 'function' ? source.hasCookie() : Boolean(config.source.neteaseCookie),
         voiceSeconds: runtimeVoiceSeconds ?? (config.voiceMessageDefaultSeconds ?? 90),
