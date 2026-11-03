@@ -92,6 +92,94 @@ CHAR_TEMPLATE = os.environ.get("DRAW_CHAR_TEMPLATE") or (
     "场景："
 )
 
+# 同一角色的三种形态各有一张参考图 + 一段专属描述（画风差别很大：Q 版 / 少女比例 / 真人）。
+_T_HEAD = "蓝色大肥鱼的拟人化形象（DeepSeek 鲸鱼娘，角色设计与参考图完全一致）："
+# 角色特征（脸/发/鳍耳/尾巴）—— 任何形态、任何场景都必须保持
+_T_FEATURES = "蓝到浅蓝渐变的长发、蓝色大眼、鲸鱼鳍状耳、蓝色鲸鱼尾巴。"
+# 服装单独一段：参考图的衣服会被条件图带进来，所以这里显式给"场景优先"的出口，
+# 否则用户要睡衣/泳装/日常服时，出图还是会套回女仆装（实测过）。
+_T_OUTFIT = (
+    "服装：默认是白色蕾丝女仆发箍 + 深蓝女仆裙 + 白色鲸鱼刺绣围裙；"
+    "**若场景描述了别的服装（睡衣、浴袍、泳装、日常服等），以场景为准**，女仆元素可只保留发箍或围裙上的鲸鱼刺绣。"
+)
+TEMPLATE_SMALL = (
+    _T_HEAD + "形态：Q 版 chibi（头身比约 1:2，大头小身）。" + _T_FEATURES + _T_OUTFIT
+    + "画风：Q 版动漫插画，赛璐璐上色，柔和打光。场景："
+)
+TEMPLATE_LARGE = (
+    _T_HEAD + "形态：正常人体比例的少女（约 6-7 头身，身材修长）。" + _T_FEATURES + _T_OUTFIT
+    + "画风：动漫插画，清晰线稿 + 赛璐璐上色，柔和打光。场景："
+)
+TEMPLATE_PEOPLE = (
+    _T_HEAD + "形态：真人化的鲸鱼女仆（写实、摄影质感，五官按参考图的真人长相，不要二次元脸）。"
+    + _T_FEATURES + _T_OUTFIT + "服饰按照片的真实布料质感呈现。"
+    + "画风：真人摄影（cosplay 写真质感），柔和自然光，浅景深。场景："
+)
+
+# 触发词 → 参考图（可带专属模板）。命中即走图生图；都不命中就用 default.txt + CHAR_TEMPLATE。
+# 想改词/换图不用改代码：设 DRAW_REF_MAP 为同样形状的 JSON（值可以是文件名，也可以是对象）。
+DEFAULT_REF_MAP = {
+    # 三个主词（人设里教模型用这三个）
+    "真人鲸鱼": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "小鲸鱼": {"ref": "dfy-small.png", "template": TEMPLATE_SMALL},
+    "大鲸鱼娘": {"ref": "dfy-large.png", "template": TEMPLATE_LARGE},
+    # 同义词兜底：模型改写 prompt 时经常把「真人鲸鱼娘」写成「真人风格/写实/照片/自拍/cos」，
+    # 光靠三个主词会掉回通用触发词（画成大鲸鱼娘）。匹配是「最长优先」，所以主词仍然赢。
+    "真人鲸鱼娘": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "真人版": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "真人": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "写实": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "摄影": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "照片": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "cosplay": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "cos": {"ref": "dfy-people.png", "template": TEMPLATE_PEOPLE},
+    "小鲸鱼娘": {"ref": "dfy-small.png", "template": TEMPLATE_SMALL},
+    "Q版": {"ref": "dfy-small.png", "template": TEMPLATE_SMALL},
+    "chibi": {"ref": "dfy-small.png", "template": TEMPLATE_SMALL},
+    "迷你": {"ref": "dfy-small.png", "template": TEMPLATE_SMALL},
+}
+
+
+def _parse_ref_map() -> dict:
+    """读 DRAW_REF_MAP（JSON）。值支持 "x.png" 或 {"ref": "x.png", "template": "…"}。"""
+    raw = os.environ.get("DRAW_REF_MAP", "").strip()
+    if not raw:
+        return dict(DEFAULT_REF_MAP)
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("顶层必须是对象")
+        out = {}
+        for trigger, value in data.items():
+            key = str(trigger).strip()
+            if not key:
+                continue
+            if isinstance(value, str):
+                out[key] = {"ref": value, "template": CHAR_TEMPLATE}
+            elif isinstance(value, dict):
+                ref = str(value.get("ref") or value.get("file") or "").strip()
+                if not ref:
+                    continue
+                out[key] = {"ref": ref, "template": str(value.get("template") or CHAR_TEMPLATE)}
+        return out or dict(DEFAULT_REF_MAP)
+    except Exception as exc:
+        log(f"⚠ DRAW_REF_MAP 解析失败（{exc}），改用内置三种形态")
+        return dict(DEFAULT_REF_MAP)
+
+
+REF_MAP = _parse_ref_map()
+
+
+def _match_ref_map(prompt: str):
+    """按"最长触发词优先"匹配（大鲸鱼娘 要先于 鲸鱼娘，免得被短词吃掉）。"""
+    if not IMG2IMG or not REF_MAP:
+        return None
+    hay = prompt.replace(" ", "").lower()
+    for trigger in sorted(REF_MAP, key=len, reverse=True):
+        if trigger.replace(" ", "").lower() in hay:
+            return trigger, REF_MAP[trigger]
+    return None
+
 _lock = threading.Lock()          # 串行化：同一时刻只跑一次推理
 _state = {
     "pipe": None,                 # 已加载的管线
@@ -334,22 +422,34 @@ def _triggered(prompt: str) -> bool:
     return any(t.replace(" ", "").lower() in hay for t in TRIGGERS)
 
 
-def resolve_ref(prompt: str, requested: str | None) -> str:
-    """决定这次要不要带参考图，返回绝对路径（空字符串 = 文生图）。"""
+def resolve_ref(prompt: str, requested: str | None):
+    """决定这次要不要带参考图。
+
+    返回 {"path", "template", "trigger"}；空字典 / None = 文生图。
+    优先级：请求里的 ref（调试用）> 触发词映射（小鲸鱼/大鲸鱼娘/真人鲸鱼）> 通用触发词 + default.txt。
+    """
     asked = str(requested or "").strip()
     if asked.lower() in ("none", "off", "0"):
-        return ""
+        return None
     if asked:
         path = _ref_path(asked)
         if path:
-            return path
+            return {"path": path, "template": CHAR_TEMPLATE, "trigger": ""}
         log(f"⚠ 请求里的 ref={asked} 不在 refs/ 里，忽略")
+    hit = _match_ref_map(prompt)
+    if hit:
+        trigger, entry = hit
+        path = _ref_path(entry.get("ref", ""))
+        if path:
+            return {"path": path, "template": entry.get("template") or CHAR_TEMPLATE, "trigger": trigger}
+        log(f"⚠ 触发词「{trigger}」指向的参考图不在 refs/ 里（{entry.get('ref')}），退回默认")
     if not _triggered(prompt):
-        return ""
+        return None
     path = _ref_path(_default_ref())
     if not path:
         log(f"⚠ 命中触发词但 refs/ 里没有可用参考图（{REFS}），退回文生图")
-    return path
+        return None
+    return {"path": path, "template": CHAR_TEMPLATE, "trigger": ""}
 
 
 def load_ref_image(path: str):
@@ -394,11 +494,13 @@ def generate(prompt: str, size: int, steps, seed=None,
         pipe = _state["pipe"]
         _state["last_used"] = time.time()
 
-        ref_path = resolve_ref(prompt, ref_name)
+        picked = resolve_ref(prompt, ref_name) or {}
+        ref_path = picked.get("path", "")
         ref_img = load_ref_image(ref_path) if ref_path else None
+        template = picked.get("template") or CHAR_TEMPLATE
         width, height = dims or _dims(size, ref_img)
 
-        kwargs = dict(prompt=(CHAR_TEMPLATE + prompt) if ref_img is not None else prompt,
+        kwargs = dict(prompt=(template + prompt) if ref_img is not None else prompt,
                       width=width, height=height, true_cfg_scale=1.0)
         te_pinned = False
         if ref_img is not None:
@@ -426,7 +528,11 @@ def generate(prompt: str, size: int, steps, seed=None,
         buf = io.BytesIO()
         image.save(buf, format="PNG")
         _state["renders"] += 1
-        how = f"图生图 ref={os.path.basename(ref_path)}" if ref_img is not None else "文生图"
+        if ref_img is not None:
+            tag = picked.get("trigger") or ""
+            how = f"图生图 ref={os.path.basename(ref_path)}" + (f"（触发词 {tag}）" if tag else "")
+        else:
+            how = "文生图"
         log(f"出图 {width}x{height}（{how}）用时 {time.time() - t0:.1f}s（第 {_state['renders']} 张）")
         _arm_idle_timer()
         return buf.getvalue()
@@ -519,6 +625,7 @@ class Handler(BaseHTTPRequestHandler):
                 "img2img": IMG2IMG,
                 "refs": _list_refs(),
                 "refDefault": _default_ref(),
+                "refMap": {t: e.get("ref", "") for t, e in REF_MAP.items()},
                 "triggers": TRIGGERS,
             })
             return
@@ -681,7 +788,9 @@ def main() -> None:
     log(f"参考图目录 {REFS}｜{len(refs)} 张｜图生图 {'开' if IMG2IMG else '关'}"
         + (f"｜默认 {_default_ref()}" if refs else ""))
     if IMG2IMG:
-        log("触发词：" + "、".join(TRIGGERS))
+        if REF_MAP:
+            log("形态映射：" + "、".join(f"{t} → {e.get('ref')}" for t, e in REF_MAP.items()))
+        log("通用触发词（用 default.txt 那张）：" + "、".join(TRIGGERS))
     pid_file = _acquire_pid_lock()
     try:
         try:

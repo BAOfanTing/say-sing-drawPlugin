@@ -142,7 +142,15 @@ curl.exe -X POST http://127.0.0.1:8899/v1/images/generations `
 
 ## 角色一致性（图生图）：说「画大肥鱼」就自动带参考图
 
-角色固定在 `refs/` 里（现在只有一张全身 Q 版 `dfy-fullbody.png`，见 [refs/README.md](refs/README.md)）。
+角色固定在 `refs/` 里，**三种形态各一张图 + 一套画风模板**（见 [refs/README.md](refs/README.md)）：
+
+| 触发词 | 参考图 | 形态 |
+|---|---|---|
+| `小鲸鱼` | `dfy-small.png` | Q 版 chibi |
+| `大鲸鱼娘` | `dfy-large.png` | 正常比例少女 |
+| `真人鲸鱼` | `dfy-people.png` | 真人化（写实摄影） |
+
+映射最长触发词优先（`大鲸鱼娘` 不会被 `鲸鱼娘` 吃掉）；改词/加形态用 `DRAW_REF_MAP` 环境变量，不用改代码。
 **prompt 命中触发词**（默认 `大肥鱼 / 鲸鱼娘 / 鲸鱼妹妹 / 小鲸鱼 / 蓝色鲸鱼 / deepseek娘 / 画自己 …`）
 就走图生图，否则还是原来的纯文生图 —— 调用方（宿主/网关）一行都不用改，宿主那条链路本来就只发 prompt：
 
@@ -226,7 +234,8 @@ curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
 | `DRAW_WEIGHTS` | `<仓库>/draw-model/weights` | 权重目录 |
 | `DRAW_REFS` | `<本目录>/refs` | 角色参考图目录（只认这里的 png/jpg/webp） |
 | `DRAW_IMG2IMG` | 1 | 0 = 关掉触发词图生图，全部走文生图 |
-| `DRAW_TRIGGERS` | `大肥鱼,鲸鱼娘,鲸鱼妹妹,小鲸鱼,蓝色鲸鱼,deepseek娘,画自己,画个自己,画一只自己` | 命中任一即走图生图 |
+| `DRAW_TRIGGERS` | `大肥鱼,鲸鱼娘,鲸鱼妹妹,小鲸鱼,蓝色鲸鱼,deepseek娘,画自己,画个自己,画一只自己` | 通用触发词（用 `default.txt` 那张 + 默认模板） |
+| `DRAW_REF_MAP` | 内置三形态 | 触发词 → 参考图（可带专属模板）的 JSON，如 `{"小鲸鱼":"dfy-small.png"}` |
 | `DRAW_REF` | 空 | 固定用哪张参考图；留空按 `refs/default.txt`，再退到目录里第一张 |
 | `DRAW_REF_MAX_SIDE` | 768 | 参考图送进视觉塔前的最长边（调小省显存/更快） |
 | `DRAW_CHAR_TEMPLATE` | 内置那段 | 固定角色描述前缀，留空用内置 |
