@@ -43,6 +43,18 @@ test('resolveEmotionKey：中文别名与 id 都能认', () => {
   assert.equal(resolveEmotionKey(''), '');
 });
 
+test('宿主 send_voice 的 emotion 枚举都能落到预设上', () => {
+  // 宿主工具参数的 enum：neutral/happy/sad/angry/soft/excited/tired/shy/playful/serious
+  const expected = {
+    neutral: 'neutral', happy: 'happy', sad: 'sad', angry: 'angry',
+    soft: 'gentle', excited: 'excited', tired: 'sad', shy: 'sajiao',
+    playful: 'excited', serious: 'neutral'
+  };
+  for (const [asked, want] of Object.entries(expected)) {
+    assert.equal(resolveEmotionKey(asked), want, `emotion=${asked}`);
+  }
+});
+
 test('mergeEmotions：字段级覆盖，false 表示删掉这个情绪', () => {
   const table = mergeEmotions({
     angry: { instructions: '改过的凶' },

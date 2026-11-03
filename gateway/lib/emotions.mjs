@@ -76,15 +76,25 @@ export const DEFAULT_EMOTIONS = {
 /** 中文/口语别名 → 预设 id。模型写【凶】或【生气】都能认。 */
 export const EMOTION_ALIASES = {
   默认: 'neutral', 正常: 'neutral', 平静: 'neutral', 普通: 'neutral',
-  撒娇: 'sajiao', 软: 'sajiao', 卖萌: 'sajiao',
+  撒娇: 'sajiao', 软: 'sajiao', 卖萌: 'sajiao', 害羞: 'sajiao',
   生气: 'angry', 凶: 'angry', 愤怒: 'angry', 发火: 'angry', 训人: 'angry', 凶一点: 'angry',
   高兴: 'happy', 开心: 'happy', 快乐: 'happy',
-  委屈: 'wronged', 哭: 'wronged', 难过哭腔: 'wronged',
-  温柔: 'gentle', 轻声: 'gentle',
+  委屈: 'wronged', 哭: 'wronged', 难过哭腔: 'wronged', 想哭: 'wronged',
+  温柔: 'gentle', 轻声: 'gentle', 哄人: 'gentle',
   不耐烦: 'impatient', 烦躁: 'impatient', 嫌弃: 'impatient',
   惊讶: 'surprise', 吃惊: 'surprise', 震惊: 'surprise',
-  兴奋: 'excited', 激动: 'excited',
-  难过: 'sad', 伤心: 'sad', 失落: 'sad'
+  兴奋: 'excited', 激动: 'excited', 俏皮: 'excited', 得意: 'excited',
+  难过: 'sad', 伤心: 'sad', 失落: 'sad', 累: 'sad', 疲惫: 'sad', 困: 'sad',
+  认真: 'neutral', 严肃: 'neutral',
+
+  // ── 宿主 send_voice 的 emotion 枚举（英文）直通 ──────────────────────────
+  // QQA 的 send_voice 允许 neutral/happy/sad/angry/soft/excited/tired/shy/playful/serious，
+  // 下面把网关没有同名预设的几个映射过去（其余同名，resolveEmotionKey 会直接命中 id）。
+  soft: 'gentle',        // 温柔/哄人
+  shy: 'sajiao',         // 害羞≈撒娇
+  playful: 'excited',    // 俏皮/打趣
+  tired: 'sad',          // 累了：放慢、压低、发闷
+  serious: 'neutral'     // 认真：不加情绪修饰
 };
 
 /** 合并用户覆盖：只覆盖给了的字段，其余沿用默认。传 false 表示删掉这个情绪。 */
