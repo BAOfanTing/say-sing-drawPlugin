@@ -22,19 +22,10 @@ try {
   process.exit(1);
 }
 
-/** 扫码登录成功后把 Cookie 写回 config.json（只改 source.neteaseCookie，其余原样保留）。 */
-function persistCookie(cookie) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    raw.source = { ...(raw.source || {}), neteaseCookie: String(cookie || '') };
-    fs.writeFileSync(configPath, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
-    console.log('[login] 网易云 Cookie 已写入 config.json');
-  } catch (error) {
-    console.warn(`[login] 写 config.json 失败：${error.message}（本次运行仍然生效）`);
-  }
-}
+// 扫码登录拿到的 Cookie 由 createApp 自己写进 gateway-run/runtime.json ——
+// 以前这里回写 config.json（人编辑的同一份文件），手改配置和扫码回写会互相覆盖。
 
-const app = createApp({ config, persistCookie });
+const app = createApp({ config });
 const server = http.createServer((req, res) => { void app.handler(req, res); });
 
 const pruneTimer = setInterval(() => {

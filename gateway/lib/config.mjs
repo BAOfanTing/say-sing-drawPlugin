@@ -83,9 +83,16 @@ export function normalizeConfig(raw, { rootDir = process.cwd() } = {}) {
       outputExt: ['wav', 'mp3', 'flac', 'm4a'].includes(asString(voice.outputExt))
         ? asString(voice.outputExt) : DEFAULT_CONFIG.voice.outputExt,
       defaultVoice: asString(voice.defaultVoice) || DEFAULT_CONFIG.voice.defaultVoice,
-      // 常驻换声（模型只加载一次）：留空 = 关掉，退回每次起进程
+      // 常驻换声（模型只加载一次）：serveCommand 留空 = 关掉；
+      // serveIdleMs **显式写 0 = 也不常驻**（每首歌起一个进程、跑完即退，显存立刻还回去）；
+      // 正数 = 常驻，闲置这么多毫秒后自己退出（下限 1 分钟）。
       serveCommand: asString(voice.serveCommand),
-      serveIdleMs: asInt(voice.serveIdleMs, 600000, 60000, 24 * 3600 * 1000),
+      serveIdleMs: (() => {
+        const raw = voice.serveIdleMs;
+        const blank = raw === undefined || raw === null || String(raw).trim() === '';
+        if (!blank && Number(raw) === 0) return 0;
+        return asInt(raw, 600000, 60000, 24 * 3600 * 1000);
+      })(),
       segmentSeconds: asInt(voice.segmentSeconds, 30, 0, 600),
       gpuFraction: Number(voice.gpuFraction) >= 0 ? Number(voice.gpuFraction) : 0.9
     },

@@ -362,9 +362,23 @@ export function createSayEngine(config) {
   const say = config.say || {};
   const engineName = String(say.engine || 'breeze').trim();
 
+  // 「现在允许用本地模型吗」：由 app 注入（GPU 槽）。本地 TTS 要 8.2 GB，
+  // 画图/唱歌正在跑的时候硬拉起来就是两个一起掉进共享内存 —— 这种情况宁可报错让宿主退回文字。
+  let localGuard = null;
+  const setLocalGuard = (fn) => { localGuard = typeof fn === 'function' ? fn : null; };
+  const assertLocalAllowed = () => {
+    if (localGuard && !localGuard()) {
+      throw Object.assign(
+        new Error('显卡正被画图/唱歌占着，本地 TTS 这次不上'),
+        { code: 'E_SAY_LOCAL_BUSY' }
+      );
+    }
+  };
+
   if (engineName === 'none') {
     return {
       name: 'none',
+      setLocalGuard,
       async convert() { throw Object.assign(new Error('说话功能没开（say.engine = none）'), { code: 'E_SAY_OFF' }); },
       async status() { return { engine: 'none', online: false, note: '网关没开说话功能' }; },
       async listVoices() { return []; },
@@ -379,6 +393,7 @@ export function createSayEngine(config) {
     const local = makeLocalEngine(say);
     return {
       name: 'auto',
+      setLocalGuard,
       setCredentials: (...args) => cloud.setCredentials(...args),
       credentials: () => cloud.credentials(),
       async convert(args) {
@@ -397,6 +412,7 @@ export function createSayEngine(config) {
             }
           }
         }
+        assertLocalAllowed();
         return await local.convert(args);
       },
       async status(options) {
@@ -416,10 +432,12 @@ export function createSayEngine(config) {
     const cloud = makeCloudEngine(say);   // 兜底：本地挂了就走云端（有 Key 才生效）
     return {
       name: 'breeze-local',
+      setLocalGuard,
       setCredentials: (...args) => cloud.setCredentials(...args),
       credentials: () => cloud.credentials(),
       async convert(args) {
         try {
+          assertLocalAllowed();
           return await local.convert(args);
         } catch (error) {
           const hasKey = Boolean(cloud.credentials().apiKey);
@@ -442,5 +460,6 @@ export function createSayEngine(config) {
 
   const engine = makeCloudEngine(say);
   engine.name = 'breeze';
+  engine.setLocalGuard = setLocalGuard;   // 纯云端用不到本地模型，接口保持一致
   return engine;
 }

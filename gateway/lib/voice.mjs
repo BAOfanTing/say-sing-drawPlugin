@@ -51,7 +51,14 @@ export function createVoiceEngine(config) {
   function createResident(config) {
     const serveCommand = String(config.voice.serveCommand || '').trim();
     if (!serveCommand) return null;
-    const idleMs = Math.max(60000, Number(config.voice.serveIdleMs) || 600000);
+    // serveIdleMs = 0 → 明确不要常驻：每首歌起一个进程、跑完就退，显存立刻还给系统。
+    // （常驻的 2.4 GB 闲着也占着，和画图/本地 TTS 抢 10 GB 的卡时最先该收的就是它。）
+    const idleRaw = config.voice.serveIdleMs;
+    if (idleRaw !== undefined && idleRaw !== null && String(idleRaw).trim() !== '' && Number(idleRaw) === 0) {
+      console.log('[voice] serveIdleMs=0 → 换声按需调用：每首歌起一个进程，跑完即退（不常驻）');
+      return null;
+    }
+    const idleMs = Math.max(60000, Number(idleRaw) || 600000);
 
     let proc = null;
     let buffer = '';
@@ -120,6 +127,7 @@ export function createVoiceEngine(config) {
 
     return {
       name: 'resident',
+      idleMs,                       // 供 /health 显示：>0 = 常驻，闲置这么久自退
       async convert({ input, output, voice, maxSeconds = 0, onProgress = null }) {
         const child = ensure();
         const id = nextId++;
@@ -226,6 +234,8 @@ export function createVoiceEngine(config) {
   return {
     name: 'command',
     voices: [config.voice.defaultVoice].filter(Boolean),
+    // 0 = 按需（不常驻），正数 = 常驻且闲置这么久自退（/health 会报出来）
+    residentIdleMs: resident ? Number(resident.idleMs) || 0 : 0,
     async convert({ input, output, voice, maxSeconds = 0, onProgress = null }) {
       // 常驻优先：省掉每次 8-12 秒的模型加载。任何失败都退回一次性进程。
       if (resident) {

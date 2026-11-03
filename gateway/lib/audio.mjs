@@ -130,15 +130,27 @@ export async function probeSeconds(file) {
  * 裁到 maxSeconds 并转成目标格式。ffmpeg 不可用时原样返回 false，
  * 让上层决定"发原文件"还是"报错"，而不是偷偷给出一个坏文件。
  */
+/**
+ * 转码。**契约统一成一条**：成功返回 true，失败返回 false（不抛）。
+ *
+ * 以前是"没有 ffmpeg 返回 false、ffmpeg 执行失败抛异常"，于是每个调用点都得自己
+ * 记着它属于哪一派（app.mjs 里那个 tryTranscode 包装就是为了接住这个不一致）。
+ * 现在调用方只要看返回值；失败原因写日志。
+ */
 export async function transcodeTo(input, output, { maxSeconds = 0, ext = 'mp3', bitrate = '96k' } = {}) {
   const bin = await detectFfmpeg();
-  if (!bin) return false;
+  if (!bin) return false;                     // 没装 ffmpeg：调用方走"原样发/降级"分支
   const args = ['-y', '-i', input];
   if (maxSeconds > 0) args.push('-t', String(Math.floor(maxSeconds)));
   if (ext === 'mp3') args.push('-vn', '-ac', '1', '-ar', '32000', '-b:a', bitrate);
   args.push(output);
-  await runProcess(bin, args, { timeoutMs: 120000 });
-  return true;
+  try {
+    await runProcess(bin, args, { timeoutMs: 120000 });
+    return true;
+  } catch (error) {
+    console.warn(`[audio] 转码失败（${bitrate}）：${String(error?.message ?? error).slice(0, 160)}`);
+    return false;
+  }
 }
 
 /**

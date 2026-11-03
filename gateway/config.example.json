@@ -15,7 +15,7 @@
     "outputExt": "wav",
     "defaultVoice": "me",
     "serveCommand": "\"<装了 RVC 依赖的 python>\" \"<仓库路径>/sing-model/run.py\" --serve",
-    "serveIdleMs": 600000,
+    "serveIdleMs": 0,
     "gpuFraction": 0.9
   },
   "transcode": "auto",

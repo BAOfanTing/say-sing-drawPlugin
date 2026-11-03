@@ -20,6 +20,11 @@
 
 ### 变更
 
+- **GPU 统一互斥（`lib/gpu-slot.mjs`）**：换声/本地 TTS/画图 三个吃显存的租户改成抢同一个槽位、重活串行，取代原来散在各调用点的两两成对检查。补上了画图上线后漏掉的两条边（画图中点歌、画图中说话会把 8.2 GB 硬塞进正在出图的卡）。说话侧新增 `say.setLocalGuard`：卡被占着就不拉本地 TTS。`/health` 新增 `gpu` 段（owner / waiting / 排队时长）。测试：`test/gpu-slot.test.mjs`、`test/gateway-gpu-slot.test.mjs`。
+- **网易云 Cookie 改存 `runtime.json`**：不再回写人编辑的 `config.json`（人机共写一个文件，扫码回写和手改配置会互相覆盖）。`sources.mjs` 补 `getCookie()`，启动时从 runtime.json 恢复登录态。
+- **转码契约统一**：`transcodeTo` 改成「成功 true / 失败 false，不抛」，删掉 `app.mjs` 里那个防御性的 `tryTranscode` 包装（原来调用方得先考古被调方属于哪一派）。
+- **三个 GPU 租户全部改按需**：换声常驻默认关掉（`voice.serveIdleMs: 0` → 每首歌起一个进程、跑完即退），出图服务闲置退出从 300 秒收紧到 **60 秒**，本地 TTS 仍是 60 秒自退 —— 10 GB 的卡上不再有「闲着也占着显存」的常驻进程。
+- **让位逻辑修正**：`yieldLocalSay()` 原来只在 `say.engine === 'breeze-local'` 时生效，配成 `auto` 就等于永远空转（画图/唱歌前不会去停那 8.4 GB 的本地 TTS），现在改成按「端口是否真在监听」判断。
 - **仓库改名**：`qq-agent-plus-singPlugin` → **`say-sing-drawPlugin`**（覆盖 说话 / 唱歌 / 画图 三条能力）。
   插件 id 仍是 `sing` —— 改 id 等于变成新插件，已装用户的设置、凭据、媒体目录都会丢。
 - **运行环境合并为两个**：`say-sing`（说话 + 唱歌同一个 conda 环境）+ 画图独立 venv。

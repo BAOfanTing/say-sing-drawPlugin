@@ -113,7 +113,8 @@ export function createNeteaseSource({ limit = 5, cookie = '', fetchFn = fetch } 
   /** 扫码登录成功后由上层调用：立即生效，并可持久化到 config.json。 */
   const setCookie = (value) => { currentCookie = String(value || '').trim(); };
 
-  return { type: 'netease', search, prepare, setCookie, hasCookie: () => Boolean(currentCookie) };
+  return { type: 'netease', search, prepare, setCookie, getCookie: () => currentCookie,
+    hasCookie: () => Boolean(currentCookie) };
 }
 
 export function createLocalSource({ dir, limit = 5 } = {}) {

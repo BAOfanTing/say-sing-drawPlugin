@@ -22,8 +22,8 @@ curl -s http://127.0.0.1:8899/health # 自检
 | `source.localDir` | `local` 时必填，放 mp3/wav/flac/m4a/ogg/opus/aac |
 | `source.limit` | 搜歌返回几条候选（1-20） |
 | `voice.engine` | `none`（直出原音，只用来跑通链路）或 `command`（调你的换声脚本） |
-| `voice.serveCommand` | 常驻换声命令（`python run.py --serve`），配了就不每个请求重载模型；留空 = 每次起进程 |
-| `voice.serveIdleMs` | 常驻换声空闲多久退出（默认 600000 = 10 分钟） |
+| `voice.serveCommand` | 常驻换声命令（`python run.py --serve`）；只有 `serveIdleMs > 0` 才启用，留空 = 每次起进程 |
+| `voice.serveIdleMs` | 换声常驻策略：**默认 0 = 按需调用**（每首歌起一个进程、跑完即退，显存立刻还回去）；填正数（毫秒，≥60000）才常驻 |
 | `voice.command` | 命令行模板，见下一节 |
 | `voice.timeoutMs` | 换声超时（默认 10 分钟） |
 | `voice.pitch` | 变调半音（男声→女声 常填 +12，反之 -12；RVC 里叫 pitch） |
@@ -106,6 +106,28 @@ python infer_cli.py -i {input} -o {output} -m me.pth -p {pitch}
 | 说话（本机 Breeze） | 11-16 秒/句；闲置后首句约 35 秒（要重新加载） | 8.2 GB 显存，闲置 1 分钟自动退出 |
 
 CPU 也能跑，但通常是实时的 3-10 倍慢，只适合离线批量。
+
+## GPU 槽：三个租户串行（`lib/gpu-slot.mjs`）
+
+换声 / 本地 TTS / 画图三者两两不能共存（10 GB 卡上的物理事实），所以**同一时刻只允许一个持有 GPU 槽**，
+其余排队：
+
+| 谁 | 什么时候拿槽 | 拿之前会不会腾显存 |
+|---|---|---|
+| 唱歌 | `createJobQueue` 的 runner 里，整首歌期间持有 | 会：`yieldLocalSay()` 停本地 TTS |
+| 画图 | `/v1/images/generations` 整段转发期间持有 | 会：`yieldLocalSay()` |
+| 说话（本地 TTS） | 只在真的要跑本地模型时持有（`breeze-local` 全程；`auto` 仅云端失败落本地那一刻） | 会：`resumeLocalSay()` 先收掉换声常驻 |
+
+- 说话侧还在启动前问一句"卡上有人吗"（`say.setLocalGuard`）：画图/唱歌正占着就**不拉本地 TTS**，
+  直接回 `E_SAY_LOCAL_BUSY`，宿主那边退回文字，而不是把 8.2 GB 硬塞进去。
+- `/health` 里能直接看到：`"gpu": { "owner": "draw", "waiting": 1, "runs": 3, "maxWaitMs": 300615 }`。
+- 代价：画图和点歌互等。实测（RTX 3080）画图 768² 要 300 秒时，期间提交的点歌会排队到画图结束
+  （`waiting=1`），宿主侧可能先撞上自己的工具超时 —— 这是串行的固有成本，不是 bug。
+  真要缓解就调小 `draw.timeoutMs`（让画图更早放弃），或别在跑图时点歌。
+
+这套规则取代了以前那种"每个调用点各自成对检查"的写法：那种 O(n²) 协调每加一个新负载就要
+改遍所有旧负载，画图上线后就漏了「画图中点歌」「画图中说话」两条边，结果是两边一起挤进共享内存。
+测试见 `test/gpu-slot.test.mjs`（槽本身）与 `test/gateway-gpu-slot.test.mjs`（路由层真的串行了）。
 
 ## 自己实现后端？
 

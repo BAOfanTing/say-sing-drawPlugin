@@ -10,6 +10,7 @@ import { createVoiceEngine } from './voice.mjs';
 import { transcodeTo, probeSeconds, shiftPitch, concatAudio, runProcess, applyFilter } from './audio.mjs';
 import { parseEmotionTag, resolveEmotionKey, emotionInstruction, emotionList } from './emotions.mjs';
 import { createSayEngine } from './say.mjs';
+import { createGpuSlot } from './gpu-slot.mjs';
 
 export const VERSION = '1.0.5';
 const WEB_DIR = path.join(import.meta.dirname, '..', 'web');
@@ -122,12 +123,31 @@ export function createApp({
   voice = createVoiceEngine(config),
   say = createSayEngine(config),
   persistCookie = null,
+  gpu = null,
   now = () => Date.now()
 }) {
   const filesDir = path.join(config.dataDir, 'files');
   const tmpDir = path.join(config.dataDir, 'tmp');
   fs.mkdirSync(filesDir, { recursive: true });
   fs.mkdirSync(tmpDir, { recursive: true });
+
+  // 三个吃显存的租户（换声 / 本地 TTS / 画图）共用这一个槽位：同一时刻只允许一个在跑。
+  // 以前是"每个调用点各自成对检查"，画图上线后漏了两条边（画图中点歌、画图中说话），
+  // 两边一起挤 10 GB 卡 → 掉进共享内存。这里塌缩成一条规则：重活串行。
+  const gpuSlot = gpu || createGpuSlot({
+    now,
+    onWait: ({ kind, waitedMs }) => {
+      if (waitedMs >= 2000) console.log(`[gpu] ${kind} 排队等了 ${(waitedMs / 1000).toFixed(1)} 秒`);
+    }
+  });
+  // 本地 TTS 只允许在"自己拿着槽位"或"卡上没人"的时候启动：
+  // 否则 auto 模式的云端兜底会在画图/唱歌进行中把 8.2 GB 拉起来。
+  if (typeof say.setLocalGuard === 'function') {
+    say.setLocalGuard(() => {
+      const owner = gpuSlot.owner();
+      return !owner || owner === 'say';
+    });
+  }
 
   /** 一条点歌任务的完整流水线。任何一步失败都抛错，任务状态落 failed（绝不给出半成品）。 */
   async function runSingJob(job, { progress }) {
@@ -252,6 +272,12 @@ export function createApp({
     try {
       fs.mkdirSync(path.dirname(runtimeStateFile), { recursive: true });
       const payload = { voiceSeconds: runtimeVoiceSeconds };
+      // 网易云登录态也落这里（runtime.json），不再回写人编辑的 config.json：
+      // 人机共写一个文件，扫码回写和手改配置撞在一起必然丢一边。
+      if (typeof source.getCookie === 'function') {
+        const cookie = String(source.getCookie() || '');
+        if (cookie) payload.neteaseCookie = cookie;
+      }
       const creds = typeof say.credentials === 'function' ? say.credentials() : {};
       if (creds.apiKey) payload.sayKey = creds.apiKey;
       if (creds.voiceId) payload.sayVoiceId = creds.voiceId;
@@ -269,6 +295,10 @@ export function createApp({
         runtimeVoiceSeconds = savedSeconds;
         console.log(`  语音条时长（来自上次设置）：${savedSeconds === 0 ? '整首' : `${savedSeconds} 秒`}`);
       }
+      if (saved?.neteaseCookie && typeof source.setCookie === 'function') {
+        source.setCookie(String(saved.neteaseCookie));
+        console.log('  网易云登录态：已从 runtime.json 恢复');
+      }
       if (saved?.sayKey || saved?.sayVoiceId) {
         if (typeof say.setCredentials === 'function') {
           say.setCredentials({ apiKey: saved.sayKey, voiceId: saved.sayVoiceId });
@@ -282,12 +312,15 @@ export function createApp({
   let activeSingJobs = 0;
 
   const queue = createJobQueue({
-    // 唱歌前先把本地 TTS 的显存让出来（yieldLocalSay 在同作用域里定义，调用时已初始化）
+    // 唱歌前先把本地 TTS 的显存让出来，然后**占住 GPU 槽**跑完整首歌：
+    // 这样画图请求不会在歌曲中途插进来（两个一起挤 10 GB 卡只会都变慢十倍）。
     runner: async (job, ctx) => {
       activeSingJobs += 1;
       try {
-        await yieldLocalSay();
-        return await runSingJob(job, ctx);
+        return await gpuSlot.run('sing', async () => {
+          await yieldLocalSay();
+          return await runSingJob(job, ctx);
+        });
       } finally {
         activeSingJobs = Math.max(0, activeSingJobs - 1);
       }
@@ -530,13 +563,24 @@ export function createApp({
     child.on('error', () => { clearTimeout(timer); resolve(false); });
   });
 
-  /** 唱歌前调用：把本地 TTS 停掉，把显存让给换声。 */
+  /** 唱歌/画图前调用：把本地 TTS 停掉，把显存让出来。
+   *
+   * 以前这里有一句 `if (config.say.engine !== 'breeze-local') return` ——
+   * 配上 `engine: auto` 就等于**永远空转**，可 auto 落本地后 TTS 一样是按需起、闲置才退的，
+   * 8.4 GB 常常正驻留着，画图/唱歌直接被挤进共享内存。所以改成按"实际上在不在跑"判断。
+   */
   const yieldLocalSay = async () => {
-    if (config.say.engine !== 'breeze-local') return;
-    if (localSayStopped) return;
-    if (!localChild && !config.say.localStopCmd) return;
-    console.log('[say] 唱歌要占显存，先停掉本地 TTS');
-    await stopLocalSay();
+    if (localChild && localChild.exitCode === null) {
+      console.log('[say] 有重活要占显存，先停掉本地 TTS');
+      await stopLocalSay();
+      localSayStopped = true;
+      return;
+    }
+    if (!(await localHealthOk())) return;            // 端口没开 = 本来就没占显存
+    if (config.say.localStopCmd) {
+      console.log('[say] 本地 TTS 还占着端口，停掉它');
+      await stopLocalSay();
+    }
     localSayStopped = true;
   };
 
@@ -762,8 +806,6 @@ export function createApp({
     const sayMaxChars = Math.max(20, Number(config.say.maxChars) || 800);
     const wasTruncated = String(speakText ?? '').replace(/\s+/g, ' ').trim().length > sayMaxChars;
     clearLocalIdle();                                 // 有请求进来就别再倒计时
-    // breeze-local：说话前必须把本地模型准备好；auto：先让云端试，失败再准备本地
-    if (config.say.engine === 'breeze-local') await resumeLocalSay();
 
     // 长回复切句：逐句合成 + 逐句音高归一，再拼回一条
     const chunks = config.say.splitSentences
@@ -771,6 +813,8 @@ export function createApp({
       : [String(speakText ?? '')];
     const tempFiles = [];
     let spoke;
+    /** 真正合成的部分（不含"要不要占 GPU 槽"那层决策）。 */
+    const synthesizeAll = async () => {
     try {
       if (chunks.length > 1) {
         console.log(`[say] 切成 ${chunks.length} 句逐句合成（避免音高漂移）`);
@@ -790,17 +834,21 @@ export function createApp({
         const ok = await concatAudio(parts, merged, { ext: 'wav' });
         if (!ok) throw Object.assign(new Error('分段合成后拼接失败'), { code: 'E_SAY_CONCAT' });
         tempFiles.push(merged);
-        spoke = { file: merged, bytes: fs.statSync(merged).size, chars: speakText.length, format: 'wav' };
-      } else {
+        return { file: merged, bytes: fs.statSync(merged).size, chars: speakText.length, format: 'wav' };
+      }
+      {
         const raw = path.join(tmpDir, `say-${Date.now()}.wav`);
         try {
           spoke = await synthesizeInRegister(speakText, raw, 42, voiceOptions);
         } catch (error) {
-          // auto：云端挂了才去拉本地模型重试一次（本地准备会收换声常驻，所以放到这里）
+          // auto：云端挂了才落本地。**必须先拿到 GPU 槽**——本地 TTS 要 8.2 GB，
+          // 画图/唱歌正在跑的时候硬拉起来就是两个一起掉进共享内存，宁可让宿主退回文字。
           if (config.say.engine !== 'auto') throw error;
-          const prepared = await resumeLocalSay();
-          if (!prepared) throw error;
-          spoke = await synthesizeInRegister(speakText, raw, 42, voiceOptions);
+          spoke = await gpuSlot.run('say', async () => {
+            const prepared = await resumeLocalSay();
+            if (!prepared) throw error;
+            return await synthesizeInRegister(speakText, raw, 42, voiceOptions);
+          });
         }
         tempFiles.push(spoke.file);
         // 云端输出保持原样（那是官方音色，改音高反而会走味）
@@ -809,12 +857,24 @@ export function createApp({
           if (normalized !== spoke.file) { tempFiles.push(normalized); spoke.file = normalized; }
         }
         spoke.format = /mp3$/i.test(spoke.file) ? 'mp3' : spoke.format;
+        return spoke;
       }
     } catch (error) {
       const code = String(error?.code || 'E_SAY');
       for (const f of tempFiles) { try { fs.rmSync(f, { force: true }); } catch { /* 忽略 */ } }
       // 401/额度类错误原样带出去：使用者最需要知道的是"Key 不对"还是"没钱了"
       throw Object.assign(new Error(`读这段话失败：${String(error?.message ?? error).slice(0, 240)}`), { code });
+    }
+    };
+
+    // 本地 TTS 要 8.2 GB：breeze-local 必然要占槽；auto 只在云端失败那一刻才占（见上面的 catch）。
+    if (config.say.engine === 'breeze-local') {
+      spoke = await gpuSlot.run('say', async () => {
+        await resumeLocalSay();          // 拿到槽位之后才把本地模型拉起来
+        return await synthesizeAll();
+      });
+    } else {
+      spoke = await synthesizeAll();
     }
 
     // 情绪后期加工：合成时已经带了表演指令，这里再补响度/节奏/硬度。
@@ -873,6 +933,11 @@ export function createApp({
       const flag = status >= 400 ? '✗' : '·';
       console.log(`[req] ${flag} ${req.method} ${pathname} → ${status} (${ms}ms)`);
     });
+    // 客户端（宿主/隧道）中途断开时，往已关闭的 socket 写会抛 EPIPE；
+    // 没有 'error' 监听器的话 Node 会把它升级成未捕获异常、**整个网关退出**（15:50 真实发生过）。
+    res.on('error', (error) => {
+      console.warn(`[req] 响应流出错（调用方多半已断开）：${String(error?.message ?? error).slice(0, 120)}`);
+    });
 
     // /health 免鉴权：只暴露"在不在、什么引擎"，方便排查隧道通不通
     // ── 画图：透传到本地出图服务（draw/ 里的 Python 服务）────────────────
@@ -886,41 +951,40 @@ export function createApp({
         if (!config.draw?.url) {
           throw Object.assign(new Error('画图后端没配置（draw.url），见 docs/DRAW.md'), { code: 'E_DRAW_OFF' });
         }
-        // ① 先把本地 TTS 的显存让出来（它 8 GB，和画图不可能共存）
-        await yieldLocalSay();
-        // ② 唱歌在跑就排队等它结束（串行队列最多 1 个）
-        const waitedFrom = Date.now();
-        while (activeSingJobs > 0 && Date.now() - waitedFrom < 5 * 60 * 1000) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-        }
         const raw = await readRawBody(req);
         const headers = { 'content-type': 'application/json' };
         if (config.draw.token) headers.authorization = `Bearer ${config.draw.token}`;
         const target = `${String(config.draw.url).replace(/\/$/, '')}/v1/images/generations`;
-        // ③ 出图服务是"闲置就退出"的（省显存），所以第一次请求大概率连不上 —— 自己拉起来再试。
-        await ensureDrawUp();
-        let response;
-        try {
-          response = await fetch(target, {
-            method: 'POST', headers, body: raw,
-            signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
-          });
-        } catch (error) {
-          // 拉起来之后又被掐断（比如刚启动就 OOM）→ 再试一次，仍失败就交给外层报 502
-          console.warn(`[draw] 首次转发失败（${String(error?.message ?? error).slice(0, 80)}），重试一次`);
-          await ensureDrawUp({ force: true });
-          response = await fetch(target, {
-            method: 'POST', headers, body: raw,
-            signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
-          });
-        }
-        const text = await response.text();
-        console.log(`[draw] → ${target} ${response.status}`);
-        res.writeHead(response.status, {
-          'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
-          'content-length': Buffer.byteLength(text)
+        // 整段都在 GPU 槽里：① 先让本地 TTS 把显存交出来；② 唱歌在跑就排队（等它把槽位还回来）；
+        // ③ 出图服务闲置会退出，连不上就先拉起来；④ 转发（中途被掐断再试一次）。
+        // 以前这里是"等 activeSingJobs 归零"，但等完之后转发期间不占任何槽位 ——
+        // 唱歌随时能插进来，和画图一起挤爆 10 GB。现在排队即互斥。
+        const text = await gpuSlot.run('draw', async () => {
+          await yieldLocalSay();
+          await ensureDrawUp();
+          let response;
+          try {
+            response = await fetch(target, {
+              method: 'POST', headers, body: raw,
+              signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
+            });
+          } catch (error) {
+            // 拉起来之后又被掐断（比如刚启动就 OOM）→ 再试一次，仍失败就交给外层报 502
+            console.warn(`[draw] 首次转发失败（${String(error?.message ?? error).slice(0, 80)}），重试一次`);
+            await ensureDrawUp({ force: true });
+            response = await fetch(target, {
+              method: 'POST', headers, body: raw,
+              signal: AbortSignal.timeout(Number(config.draw.timeoutMs) || 600000)
+            });
+          }
+          console.log(`[draw] → ${target} ${response.status}`);
+          return { status: response.status, body: await response.text(), contentType: response.headers.get('content-type') };
         });
-        res.end(text);
+        res.writeHead(text.status, {
+          'content-type': text.contentType || 'application/json; charset=utf-8',
+          'content-length': Buffer.byteLength(text.body)
+        });
+        res.end(text.body);
         return;
       } catch (error) {
         const message = `画图后端不可用：${String(error?.message ?? error).slice(0, 200)}`;
@@ -944,6 +1008,10 @@ export function createApp({
         voiceConfigured,
         // 没接换声模型就报空列表：不把"根本不存在的音色"说成可用
         voices: voiceConfigured ? voice.voices : [],
+        // 换声是否常驻：0 = 按需（每首歌起进程、跑完即退），正数 = 常驻且闲置这么久自退
+        voiceResidentMs: Number(voice.residentIdleMs) || 0,
+        // 谁现在占着 GPU、还有几个在排队（三个租户共享一个槽位，见 gpu-slot.mjs）
+        gpu: { owner: gpuSlot.owner(), waiting: gpuSlot.waiting(), ...gpuSlot.stats() },
         source: source.type,
         neteaseCookie: typeof source.hasCookie === 'function' ? source.hasCookie() : Boolean(config.source.neteaseCookie),
         voiceSeconds: runtimeVoiceSeconds ?? (config.voiceMessageDefaultSeconds ?? 90),
@@ -1088,21 +1156,13 @@ export function createApp({
         // 所以这里不直接把成品甩出去 —— 不是 mp3 或超过 3.5MB，就现转一份（96k，仍大就 64k）。
         if (!/\.mp3$/i.test(name) || buffer.length > 3.5 * 1024 * 1024) {
           const converted = path.join(tmpDir, `voice-send-${job.jobId}.mp3`);
-          // transcodeTo 在 ffmpeg 失败时是抛异常（不是返回 false），必须自己接住
-          const tryTranscode = async (opts) => {
-            try {
-              return await transcodeTo(file, converted, opts);
-            } catch (error) {
-              console.warn(`[voice] 转码失败：${String(error?.message ?? error).slice(0, 120)}`);
-              return false;
-            }
-          };
-          let ok = await tryTranscode({ ext: 'mp3' });
+          // transcodeTo 的契约是"失败返回 false、不抛"（见 audio.mjs），这里直接看返回值
+          let ok = await transcodeTo(file, converted, { ext: 'mp3' });
           // 逐级降码率：96k → 64k → 48k。宿主只收 4MB，10 分钟的歌 64k 也会超。
           for (const bitrate of ['64k', '48k']) {
             if (!ok || !fs.existsSync(converted) || fs.statSync(converted).size <= 3.5 * 1024 * 1024) break;
             console.log(`[voice] 成品仍超过 3.5MB，降到 ${bitrate} 再试`);
-            ok = await tryTranscode({ ext: 'mp3', bitrate });
+            ok = await transcodeTo(file, converted, { ext: 'mp3', bitrate });
           }
           if (ok && fs.existsSync(converted)) {
             name = path.basename(converted);
@@ -1264,5 +1324,5 @@ export function createApp({
     }
   };
 
-  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say };
+  return { handler, queue, filesDir, tmpDir, pruneFiles, pruneBeforeToday, say, gpu: gpuSlot };
 }
