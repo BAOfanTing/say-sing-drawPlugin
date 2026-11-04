@@ -7,6 +7,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { loadConfig } from './lib/config.mjs';
 import { createApp, VERSION } from './lib/app.mjs';
+import { installCrashGuard } from './lib/crash-guard.mjs';
 
 const argOf = (name, fallback) => {
   const index = process.argv.indexOf(`--${name}`);
@@ -24,6 +25,10 @@ try {
 
 // 扫码登录拿到的 Cookie 由 createApp 自己写进 gateway-run/runtime.json ——
 // 以前这里回写 config.json（人编辑的同一份文件），手改配置和扫码回写会互相覆盖。
+
+// 装保命网：单个后端（出图 / 换声 / 本地 TTS）出问题只该降级成 502，
+// 不能冒出没人接的 Promise 拒绝把整个网关带崩（2026-11-04 实测崩过，见 crash-guard.mjs）。
+installCrashGuard({ proc: process, log: (msg) => console.error(msg) });
 
 const app = createApp({ config });
 const server = http.createServer((req, res) => { void app.handler(req, res); });
