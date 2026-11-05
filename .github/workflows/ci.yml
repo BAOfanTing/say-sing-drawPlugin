@@ -1,10 +1,15 @@
 name: ci
 
-# 每次 push / PR 都跑：清单校验 + 单元测试。
+# 每次 push / PR 都跑：清单校验（有插件层的分支才跑）+ 单元测试。
 # 发布前的"这堆代码还能不能用"就靠它，别等到发版才发现。
+#
+# 三个分支各跑各的（见 docs/DEVELOPMENT.md「分支约定」）：
+#   core           = 宿主无关基线，没有 plugin/sing → 只跑单元测试
+#   main           = core + qq-agent-plus 插件层 → 清单校验 + 单元测试
+#   dsh-aurabot-qq = core + aurabot 适配层，没有 plugin/sing → 只跑单元测试
 on:
   push:
-    branches: [main]
+    branches: [main, core, dsh-aurabot-qq]
   pull_request:
   workflow_dispatch:
 
@@ -19,8 +24,15 @@ jobs:
         with:
           node-version: '22'
 
+      # 只有带插件层（qq-agent-plus 的 plugin/sing）的分支才需要校验清单；
+      # core / dsh-aurabot-qq 上这个目录根本不存在，硬跑会直接 exit 2。
       - name: 清单基本校验
-        run: node scripts/check-manifest.mjs plugin/sing
+        run: |
+          if [ -f plugin/sing/plugin.json ]; then
+            node scripts/check-manifest.mjs plugin/sing
+          else
+            echo "本分支没有插件层（core / aurabot 分支），跳过清单校验"
+          fi
 
       # 测试清单只有一份：package.json 的 test 脚本（node --test test/*.test.mjs）。
       # 以前这里手写列文件，重构新增的 6 个测试（gpu-slot / managed-model / local-say /
