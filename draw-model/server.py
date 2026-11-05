@@ -23,11 +23,11 @@
     DRAW_WEIGHTS=<仓库>/draw-model/weights
     DRAW_IDLE_SECONDS=60         闲置多少秒后卸载模型（0 = 常驻；默认按需：用完一分钟就退）
     DRAW_KEEP_WARM=0             1 = 画完不卸载、留着热管线（显存 ≥16 GB 的卡再开；
-                                 10 GB 卡上保热会退化：第 1 张 79s、第 2 张 129s、第 3 张假死）
+                                 10 GB 卡上保热会退化：实测第 1 张 79s、第 2 张 129s）
     DRAW_EXIT_AFTER_RENDER=1     1 = 画完一张就让进程退出，下次由网关按需拉起（默认开，见下）
-                                 同一进程里「卸载→重载」实测有坑：重载后的那张会跑在 CPU/共享内存上，
-                                 240 秒超时是常态、极端情况下 10 小时才回来；而新进程的「第一张」
-                                 永远是快路径（61~62 秒）。多花 25 秒拉起，换不掉死。
+                                 同一进程里的**第二张**起不来：三次实测（含「卸载→重载」之后
+                                 那次）都超过 240 秒不返回，醒着跑也一样；而新进程的第一张
+                                 稳定 61~62 秒。多花 ~25 秒拉起，换掉「卡死」。
     DRAW_SIZE=1024               默认边长
     DRAW_STEPS=（留空则用 Turbo 的 sample_sigmas）
 
@@ -66,10 +66,10 @@ PORT = int(os.environ.get("DRAW_PORT", "7880"))
 HOST = os.environ.get("DRAW_HOST", "127.0.0.1")
 TOKEN = os.environ.get("DRAW_TOKEN", "").strip()
 IDLE_SECONDS = int(os.environ.get("DRAW_IDLE_SECONDS", "60"))
-# 保热：画完不卸载，下一张直接复用管线。10 GB 卡上不能开 —— 见第 3 张假死那条注释。
+# 保热：画完不卸载，下一张直接复用管线。10 GB 卡上不能开 —— 第二张起会退化，见文件头。
 KEEP_WARM = os.environ.get("DRAW_KEEP_WARM", "0").strip() in ("1", "true", "True", "yes", "on")
 # 一张图一个进程：画完就退，下次由网关/计划任务按需拉起。
-# 理由见文件头：同进程「卸载→重载」之后的那一张会退化到 CPU/共享内存（240s 超时、极端 10 小时）。
+# 理由见文件头：同一进程的第二张（含卸载重载后的那张）三次实测都 240 秒不返回。
 EXIT_AFTER_RENDER = os.environ.get("DRAW_EXIT_AFTER_RENDER", "1").strip() not in ("0", "false", "False", "no", "off")
 DEFAULT_SIZE = int(os.environ.get("DRAW_SIZE", "1024"))
 DEFAULT_STEPS = os.environ.get("DRAW_STEPS", "").strip()
@@ -380,8 +380,8 @@ def unload_pipeline(reason: str = "") -> None:
 def _exit_after_render() -> None:
     """画完一张就退出（默认行为）。
 
-    同一进程里卸载再重载，第二张会退化到 CPU / 共享内存：实测 240 秒超时是常态，
-    极端一次 36721 秒才返回；而新进程的第一张永远走快路径（61~62 秒）。
+    同一进程里的第二张起不来：三次实测（含「卸载→重载」之后那次）都超过 240 秒不返回，
+    机器全程醒着；而新进程的第一张稳定 61~62 秒（今天连测 3 次）。
     所以干脆「一张图一个进程」，下次请求由网关按需拉起（多花 ~25 秒，但不掉死）。
     """
     log("画完一张就退出（下次由网关按需拉起）—— 见 DRAW_EXIT_AFTER_RENDER")
@@ -632,10 +632,8 @@ def generate(prompt: str, size: int, steps, seed=None,
         if KEEP_WARM:
             _arm_idle_timer()
         else:
-            # **默认每张画完就释放模型**。保热会让 accelerate 的 cpu-offload 状态越积越坏：
-            # 同一进程实测第 1 张 79s、第 2 张 129s、第 3 张假死（跑了 36721 秒才返回），
-            # 而「每张后卸载重载」连画 3 张是 127s / 79s / 85s，稳得很。
-            # 代价只是每张多 30 秒加载 —— 比卡住 5 分钟、或者挂一整夜好得多。
+            # 默认先把模型卸掉（进程马上也会退出，这里顺手把显存立刻还回去）。
+            # 保热时观察到退化：第 1 张 79s → 第 2 张 129s，10 GB 卡上不要开 DRAW_KEEP_WARM。
             unload_pipeline("每张画完就释放（DRAW_KEEP_WARM=1 可保热）")
         return buf.getvalue()
 
