@@ -29,7 +29,7 @@
 
 ![image-20261030100547632](https://gitee.com/baofanting/image/raw/master/image/20261030100547692.png)
 
-![image-20261102225245056](https://gitee.com/baofanting/image/raw/master/image/20261102225245184.png)
+![image-20261104130900838](https://gitee.com/baofanting/image/raw/master/image/20261104130900929.png)
 
 ## 它怎么工作
 
