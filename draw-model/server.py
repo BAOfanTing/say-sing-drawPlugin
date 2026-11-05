@@ -22,12 +22,19 @@
     DRAW_TOKEN=（留空则不校验）
     DRAW_WEIGHTS=<仓库>/draw-model/weights
     DRAW_IDLE_SECONDS=60         闲置多少秒后卸载模型（0 = 常驻；默认按需：用完一分钟就退）
+    DRAW_KEEP_WARM=0             1 = 画完不卸载、留着热管线（显存 ≥16 GB 的卡再开；
+                                 10 GB 卡上保热会退化：第 1 张 79s、第 2 张 129s、第 3 张假死）
+    DRAW_EXIT_AFTER_RENDER=1     1 = 画完一张就让进程退出，下次由网关按需拉起（默认开，见下）
+                                 同一进程里「卸载→重载」实测有坑：重载后的那张会跑在 CPU/共享内存上，
+                                 240 秒超时是常态、极端情况下 10 小时才回来；而新进程的「第一张」
+                                 永远是快路径（61~62 秒）。多花 25 秒拉起，换不掉死。
     DRAW_SIZE=1024               默认边长
     DRAW_STEPS=（留空则用 Turbo 的 sample_sigmas）
 
 角色一致性（图生图，见 refs/README.md）：
     DRAW_REFS=<仓库>/draw-model/refs   参考图目录（只认这个目录里的 png/jpg，防目录穿越）
     DRAW_IMG2IMG=1                     0 = 关掉触发词图生图，退回纯文生图
+    DRAW_IMG2IMG_SIZE=768              图生图按这个边长算面积上限（0 = 不压，跟 DRAW_SIZE 一样）
     DRAW_TRIGGERS=大肥鱼,鲸鱼娘,…      命中任一即走图生图
     DRAW_REF=                          固定用哪张参考图（留空 = 按 refs/default.txt 或目录里第一张）
     DRAW_CHAR_TEMPLATE=…              固定角色描述前缀（留空用内置那段）
@@ -37,7 +44,8 @@
     "size": "768x1024"          宽高分开给（以前只取宽，正方形）
 
 健壮性：
-    DRAW_REQUEST_TIMEOUT=300    单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限
+    DRAW_REQUEST_TIMEOUT=240    单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限
+                               （实测一张 45~60 秒；给 240 秒留 4 倍余量，超了八成是又撞上共享内存）
     DRAW_LOG=<本目录>/logs/service.log   日志文件（调度任务起的进程抓不到控制台）
 """
 from __future__ import annotations
@@ -58,6 +66,11 @@ PORT = int(os.environ.get("DRAW_PORT", "7880"))
 HOST = os.environ.get("DRAW_HOST", "127.0.0.1")
 TOKEN = os.environ.get("DRAW_TOKEN", "").strip()
 IDLE_SECONDS = int(os.environ.get("DRAW_IDLE_SECONDS", "60"))
+# 保热：画完不卸载，下一张直接复用管线。10 GB 卡上不能开 —— 见第 3 张假死那条注释。
+KEEP_WARM = os.environ.get("DRAW_KEEP_WARM", "0").strip() in ("1", "true", "True", "yes", "on")
+# 一张图一个进程：画完就退，下次由网关/计划任务按需拉起。
+# 理由见文件头：同进程「卸载→重载」之后的那一张会退化到 CPU/共享内存（240s 超时、极端 10 小时）。
+EXIT_AFTER_RENDER = os.environ.get("DRAW_EXIT_AFTER_RENDER", "1").strip() not in ("0", "false", "False", "no", "off")
 DEFAULT_SIZE = int(os.environ.get("DRAW_SIZE", "1024"))
 DEFAULT_STEPS = os.environ.get("DRAW_STEPS", "").strip()
 
@@ -79,7 +92,7 @@ TRIGGERS = [
 REF_OVERRIDE = os.environ.get("DRAW_REF", "").strip()
 # 单次请求最多等多久（秒）。超过就回 504 并把管线标记为"待卸载"：
 # 之前没有这道闸，一次掉进共享内存的渲染能把服务卡死十几分钟，健康检查都连不上。
-REQUEST_TIMEOUT = float(os.environ.get("DRAW_REQUEST_TIMEOUT", "300") or 0)
+REQUEST_TIMEOUT = float(os.environ.get("DRAW_REQUEST_TIMEOUT", "240") or 0)
 LOG_PATH = os.environ.get("DRAW_LOG") or os.path.join(_HERE, "logs", "service.log")
 
 # 固定角色描述：参考图已经给了脸和服装，这段只补参考图裁掉/模糊掉的部分（尾巴、围裙刺绣、鳍耳）。
@@ -330,6 +343,13 @@ def load_pipeline():
         processor=processor, transformer=transformer,
     )
     pipe.vae.enable_slicing()
+    # VAE 解码是"最后一道尖峰"：整张图一次性解码时中间激活很大，10 GB 卡会在这一步爆进共享内存。
+    # 分块解码把尖峰摊平（DRAW_VAE_TILING=0 可关，万一某张图出现拼缝）。
+    if os.environ.get("DRAW_VAE_TILING", "1").strip() not in ("0", "false", "False"):
+        try:
+            pipe.vae.enable_tiling()
+        except Exception:
+            pass
     # 10 GB 卡必须靠 offload：用不到的组件留在内存、用到时才搬上卡。
     # 不加会把 DiT(≈4G) + TE(≈5G) + VAE 一起塞进显卡，超物理显存后走 Windows 共享内存，
     # 单张从 25 秒掉到十几分钟（实测 900 秒无响应、显存显示 10.95 GB）。
@@ -355,6 +375,17 @@ def unload_pipeline(reason: str = "") -> None:
     except Exception:
         pass
     log(f"模型已卸载（{reason}）")
+
+
+def _exit_after_render() -> None:
+    """画完一张就退出（默认行为）。
+
+    同一进程里卸载再重载，第二张会退化到 CPU / 共享内存：实测 240 秒超时是常态，
+    极端一次 36721 秒才返回；而新进程的第一张永远走快路径（61~62 秒）。
+    所以干脆「一张图一个进程」，下次请求由网关按需拉起（多花 ~25 秒，但不掉死）。
+    """
+    log("画完一张就退出（下次由网关按需拉起）—— 见 DRAW_EXIT_AFTER_RENDER")
+    os._exit(0)
 
 
 def _arm_idle_timer() -> None:
@@ -465,6 +496,51 @@ def load_ref_image(path: str):
     return img
 
 
+def _img2img_area_limit(size: int) -> int:
+    """带参考图的图生图，面积上限按这个边长算（默认 768）。
+
+    实测（RTX 3080 10 GB + nf4，8 步）：
+      · 文生图 1024²  → 采样 ~15 s，整张 <60 s ✅
+      · 图生图 1024²  → 采样 184 s（每步 5.3 s 涨到 26.8 s = 掉进共享内存），VAE 解码再等 >900 s 没回来 ❌
+      · 图生图 768²   → 640x928 / 114 s 出图 ✅
+    参考图本身已经给了脸和服装，降一点分辨率对「像不像」几乎没影响，对速度是 5~8 倍。
+    """
+    try:
+        cap = int(float(os.environ.get("DRAW_IMG2IMG_SIZE", "768") or 0))
+    except (TypeError, ValueError):
+        cap = 768
+    return min(size, cap) if cap > 0 else size
+
+
+def _fit_dims(dims: tuple[int, int], size: int) -> tuple[int, int]:
+    """把请求里给的宽高等比缩到 size² 面积以内（宽高都对齐 32）。"""
+    w, h = int(dims[0]), int(dims[1])
+    if w <= 0 or h <= 0:
+        return size, size
+    scale = (size * size / (w * h)) ** 0.5
+    if scale >= 1:
+        return w, h
+    w = max(256, min(2048, int(round(w * scale / 32)) * 32))
+    h = max(256, min(2048, int(round(h * scale / 32)) * 32))
+    return w, h
+
+
+def _peak_vram_note() -> str:
+    """这一张的显存峰值（读一次就重置）。峰值超过物理显存 = 已经掉进共享内存，就是它慢。"""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return ""
+        peak = torch.cuda.max_memory_reserved() / 2**30
+        total = torch.cuda.mem_get_info()[1] / 2**30
+        torch.cuda.reset_peak_memory_stats()
+        note = f"，峰值显存 {peak:.2f} GB / {total:.2f} GB"
+        return note + ("（已超物理显存，走共享内存）" if peak > total else "")
+    except Exception:
+        return ""
+
+
 def _dims(size: int, ref_img) -> tuple[int, int]:
     """给出宽高：有参考图就按它的比例铺满 size² 的面积（否则参考图的比例会被压扁）。"""
     if ref_img is None:
@@ -498,6 +574,15 @@ def generate(prompt: str, size: int, steps, seed=None,
         ref_path = picked.get("path", "")
         ref_img = load_ref_image(ref_path) if ref_path else None
         template = picked.get("template") or CHAR_TEMPLATE
+        # 图生图比文生图重得多（见 _img2img_area_limit 里的实测），默认先把面积压到 768² 以内，
+        # 否则 10 GB 卡上一路掉进共享内存，等到超时（504）都出不来。
+        if ref_img is not None:
+            capped = _img2img_area_limit(size)
+            if capped != size:
+                log(f"图生图按 {capped}² 面积出（原始 {size}²；要原尺寸设 DRAW_IMG2IMG_SIZE={size}）")
+                size = capped
+                if dims:
+                    dims = _fit_dims(dims, capped)
         width, height = dims or _dims(size, ref_img)
 
         kwargs = dict(prompt=(template + prompt) if ref_img is not None else prompt,
@@ -520,21 +605,38 @@ def generate(prompt: str, size: int, steps, seed=None,
 
         t0 = time.time()
         try:
+            torch.cuda.reset_peak_memory_stats()   # 每个请求单独量峰值（慢的时候一眼看出是不是溢出到共享内存）
+        except Exception:
+            pass
+        try:
             image = pipe(**kwargs).images[0]
         finally:
             if te_pinned:
                 pipe.text_encoder.to("cpu")
                 torch.cuda.empty_cache()
+        t_infer = time.time()
         buf = io.BytesIO()
         image.save(buf, format="PNG")
+        t_save = time.time()
         _state["renders"] += 1
         if ref_img is not None:
             tag = picked.get("trigger") or ""
             how = f"图生图 ref={os.path.basename(ref_path)}" + (f"（触发词 {tag}）" if tag else "")
         else:
             how = "文生图"
-        log(f"出图 {width}x{height}（{how}）用时 {time.time() - t0:.1f}s（第 {_state['renders']} 张）")
-        _arm_idle_timer()
+        log(
+            f"出图 {width}x{height}（{how}）用时 {t_save - t0:.1f}s"
+            f"＝采样+解码 {t_infer - t0:.1f}s + PNG {t_save - t_infer:.1f}s"
+            f"（第 {_state['renders']} 张）" + _peak_vram_note()
+        )
+        if KEEP_WARM:
+            _arm_idle_timer()
+        else:
+            # **默认每张画完就释放模型**。保热会让 accelerate 的 cpu-offload 状态越积越坏：
+            # 同一进程实测第 1 张 79s、第 2 张 129s、第 3 张假死（跑了 36721 秒才返回），
+            # 而「每张后卸载重载」连画 3 张是 127s / 79s / 85s，稳得很。
+            # 代价只是每张多 30 秒加载 —— 比卡住 5 分钟、或者挂一整夜好得多。
+            unload_pipeline("每张画完就释放（DRAW_KEEP_WARM=1 可保热）")
         return buf.getvalue()
 
 
@@ -703,6 +805,11 @@ class Handler(BaseHTTPRequestHandler):
             "created": int(time.time()),
             "data": [{"b64_json": base64.b64encode(png).decode("ascii")}],
         })
+        if EXIT_AFTER_RENDER:
+            # 等响应真正写出去再退（base64 一兆多，留 2 秒余量，别把包截断）
+            timer = threading.Timer(2.0, _exit_after_render)
+            timer.daemon = True
+            timer.start()
 
 
 def _pid_alive(pid: int) -> bool:
