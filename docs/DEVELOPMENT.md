@@ -1,5 +1,33 @@
 # 开发与测试
 
+## 分支约定（三个分支，别乱合）
+
+这个仓库同时服务两个宿主，**宿主适配的改动不能串门**。所以分三层：
+
+| 分支 | 是什么 | 谁用 |
+|---|---|---|
+| `core` | **宿主无关的公共基线**：`gateway/`、`draw-model/`、`say-model/`、`sing-model/`、`scripts/` 公共脚本、公共 docs / test | 不直接发布，只当基线 |
+| `main` | `core` + **qq-agent-plus 插件层**（`plugin/sing/`、宿主菜单与 README 安装说明） | qq-agent-plus 宿主；发版出包的也是它 |
+| `dsh-aurabot-qq` | `core` + **aurabot 适配层**（`GET /v1/models`、`docs/AURABOT.md`、`scripts/check-aurabot.ps1`、`test/aurabot-contract.test.mjs`） | dsh-aurabot-qq 宿主（DSH 插件，不走 `plugin/`） |
+
+**改东西之前先问一句：这条改动跟宿主有关吗？**
+
+- 跟宿主无关（说话/唱歌/画图本体、网关行为、协议字段、公共文档）→ 提交到 **`core`**，
+  然后两个宿主分支各 `git merge core` 一次：
+  ```bash
+  git checkout core && git commit ...        # 公共改动
+  git checkout main && git merge core        # qq-agent-plus 拿到
+  git checkout dsh-aurabot-qq && git merge core   # aurabot 拿到
+  ```
+- 只对某个宿主有意义（插件层、某个宿主的模型清单口、接入手册、自检脚本）→ **只提交到那个宿主分支**，
+  永远不要往 `core` 合。
+- 在宿主分支上顺手牵到的公共修复，记得回头单独提一次到 `core`（用 `git cherry-pick -x <sha>`），
+  否则另一个宿主永远拿不到。
+
+`main` 与 `dsh-aurabot-qq` 之间**不要互相 merge**，只能通过 `core` 中转。
+
+## 测试
+
 ```bash
 node --test            # 55 个用例（5 个文件）：插件纯函数 / 网关队列 / 网关路由 / 情绪预设 / 真协议集成
 node gateway/server.mjs
