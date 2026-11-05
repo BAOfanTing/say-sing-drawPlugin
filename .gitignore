@@ -82,3 +82,6 @@ draw-model/refs/_norm/
 draw-model/refs/_grid/
 draw-model/refs/_contact*
 draw-model/refs/_refs-check*
+
+# 运行时隧道/临时输入（不进仓库）
+/logs/

@@ -38,10 +38,16 @@
     DRAW_TRIGGERS=大肥鱼,鲸鱼娘,…      命中任一即走图生图
     DRAW_REF=                          固定用哪张参考图（留空 = 按 refs/default.txt 或目录里第一张）
     DRAW_CHAR_TEMPLATE=…              固定角色描述前缀（留空用内置那段）
+    DRAW_CHAT_TEMPLATE=（有内置默认）
+                                      请求体里带 "image"（聊天里那张图）时垫在前面的那句指令；
+                                      默认「保持人物形象、按要求重新画」；设成空串 = 只按用户这句话改
 
 请求体除 OpenAI 那几个字段外还认两个（供 curl 调试，宿主不会传）：
     "ref": "dfy-fullbody.png"   指定参考图；"ref": "none" 强制文生图
     "size": "768x1024"          宽高分开给（以前只取宽，正方形）
+    "image": "data:image/png;base64,…"
+                                条件图：拿这张图当参考改画（宿主把聊天里那张图缩好塞进来）。
+                                只按 prompt 改，不套角色描述前缀；想加前缀设 DRAW_CHAT_TEMPLATE
 
 健壮性：
     DRAW_REQUEST_TIMEOUT=240    单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限
@@ -54,6 +60,7 @@ import base64
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -103,6 +110,14 @@ CHAR_TEMPLATE = os.environ.get("DRAW_CHAR_TEMPLATE") or (
     "水滴形的鳍状耳，身后一条蓝色鲸鱼尾巴，蓝白配色。"
     "画风：Q 版动漫插画，赛璐璐上色，柔和打光。"
     "场景："
+)
+
+# 「拿聊天里那张图当参考」用的前缀。这个管线的 image 是「条件图 latent 前置」，没有 denoising 强度可调，
+# 提示词不明确时它会**几乎照抄**参考图（实测：一句话只写「改成厚涂插画、雨天街角」→ 出来还是原图）。
+# 所以默认垫一句「保持人物、按要求重画」，把改动意图说清楚；设成空串就退回纯用户提示词。
+CHAT_TEMPLATE = os.environ.get("DRAW_CHAT_TEMPLATE", "").strip() if "DRAW_CHAT_TEMPLATE" in os.environ else (
+    "以参考图中的人物形象为准（长相、发型、服装保持一致），按下面的要求重新画一张，"
+    "背景、姿势、画风都可以按描述变化："
 )
 
 # 同一角色的三种形态各有一张参考图 + 一段专属描述（画风差别很大：Q 版 / 少女比例 / 真人）。
@@ -555,8 +570,46 @@ def _dims(size: int, ref_img) -> tuple[int, int]:
 
 
 # ── 推理 ──────────────────────────────────────────────────
+def _chat_image(body: dict):
+    """请求体里的条件图（data:image/…;base64,… 或裸 base64）→ PIL Image；没有就返回 None。
+
+    聊天里发来的图走这条路：调用方（宿主）把图缩好、编成 data URI 塞进 `image` 字段。
+    有上限（默认 16 MB）—— 一兆多的图没问题，别把整个相册塞进来。
+    """
+    raw = body.get("image") or body.get("image_b64") or ""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    from PIL import Image
+
+    text = raw.strip()
+    m = re.match(r"^data:image/[a-z0-9.+-]+;base64,(.*)$", text, re.IGNORECASE | re.DOTALL)
+    if m:
+        text = m.group(1)
+    limit = int(os.environ.get("DRAW_IMAGE_MAX_BYTES", str(16 * 1024 * 1024)))
+    try:
+        blob = base64.b64decode(text, validate=False)
+    except Exception as exc:
+        raise ValueError(f"image 字段不是合法的 base64：{exc}") from exc
+    if not blob:
+        raise ValueError("image 字段解码后是空的（base64 内容不对劲）")
+    if len(blob) > limit:
+        raise ValueError(f"条件图太大（{len(blob) / 2**20:.1f} MB > {limit / 2**20:.0f} MB）")
+    try:
+        img = Image.open(io.BytesIO(blob))
+        img.load()
+    except Exception as exc:
+        raise ValueError(f"image 字段不是能识别的图片：{exc}") from exc
+    img = img.convert("RGB")
+    max_side = int(os.environ.get("DRAW_REF_MAX_SIDE", "768"))
+    if max(img.size) > max_side:
+        scale = max_side / max(img.size)
+        img = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))), Image.LANCZOS)
+    return img
+
+
 def generate(prompt: str, size: int, steps, seed=None,
-             ref_name: str | None = None, dims: tuple[int, int] | None = None) -> bytes:
+             ref_name: str | None = None, dims: tuple[int, int] | None = None,
+             ref_image=None) -> bytes:
     import torch
 
     with _lock:
@@ -570,9 +623,15 @@ def generate(prompt: str, size: int, steps, seed=None,
         pipe = _state["pipe"]
         _state["last_used"] = time.time()
 
-        picked = resolve_ref(prompt, ref_name) or {}
-        ref_path = picked.get("path", "")
-        ref_img = load_ref_image(ref_path) if ref_path else None
+        if ref_image is not None:
+            # 调用方直接给的图（聊天里那张）：不套角色描述前缀，只按用户这句话来。
+            picked = {"template": CHAT_TEMPLATE, "trigger": "", "path": ""}
+            ref_path = ""
+            ref_img = ref_image
+        else:
+            picked = resolve_ref(prompt, ref_name) or {}
+            ref_path = picked.get("path", "")
+            ref_img = load_ref_image(ref_path) if ref_path else None
         template = picked.get("template") or CHAR_TEMPLATE
         # 图生图比文生图重得多（见 _img2img_area_limit 里的实测），默认先把面积压到 768² 以内，
         # 否则 10 GB 卡上一路掉进共享内存，等到超时（504）都出不来。
@@ -620,8 +679,11 @@ def generate(prompt: str, size: int, steps, seed=None,
         t_save = time.time()
         _state["renders"] += 1
         if ref_img is not None:
-            tag = picked.get("trigger") or ""
-            how = f"图生图 ref={os.path.basename(ref_path)}" + (f"（触发词 {tag}）" if tag else "")
+            if ref_image is not None:
+                how = "图生图（聊天里那张图）"
+            else:
+                tag = picked.get("trigger") or ""
+                how = f"图生图 ref={os.path.basename(ref_path)}" + (f"（触发词 {tag}）" if tag else "")
         else:
             how = "文生图"
         log(
@@ -723,6 +785,7 @@ class Handler(BaseHTTPRequestHandler):
                 "idleSeconds": IDLE_SECONDS,
                 "lastError": _state["last_error"],
                 "img2img": IMG2IMG,
+                "chatImage": True,          # 请求体里可以带 "image"（聊天里那张图）当条件图
                 "refs": _list_refs(),
                 "refDefault": _default_ref(),
                 "refMap": {t: e.get("ref", "") for t, e in REF_MAP.items()},
@@ -770,6 +833,15 @@ class Handler(BaseHTTPRequestHandler):
                 pass
         steps = body.get("steps") or (DEFAULT_STEPS or None)
 
+        # 聊天里那张图（宿主缩好、编成 data URI 传来的）→ 当条件图走图生图
+        try:
+            ref_image = _chat_image(body)
+        except ValueError as exc:
+            self._send(400, {"error": {"message": str(exc)}})
+            return
+        if ref_image is not None:
+            log(f"收到条件图 {ref_image.width}x{ref_image.height}（聊天里那张），按图生图出")
+
         def _abort_render():
             """让正在跑的采样循环自己收尾（diffusers 每步都会看 pipe._interrupt）。"""
             pipe = _state.get("pipe")
@@ -784,7 +856,8 @@ class Handler(BaseHTTPRequestHandler):
                 REQUEST_TIMEOUT,
                 lambda: generate(prompt, max(width, height), steps, body.get("seed"),
                                  ref_name=body.get("ref"),
-                                 dims=(width, height) if width != height else None),
+                                 dims=(width, height) if width != height else None,
+                                 ref_image=ref_image),
                 on_timeout=_abort_render,
             )
         except TimeoutError as exc:

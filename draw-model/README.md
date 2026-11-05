@@ -201,6 +201,29 @@ curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
 > 之后那次）三次实测都超过 240 秒不返回（机器全程醒着）。所以默认 `DRAW_EXIT_AFTER_RENDER=1`：
 > 画完就退出，下次由网关按需拉起，多花 ~25 秒换掉卡死。实测真实链路连画 3 张：95.1s / 94.7s / 95.9s。
 
+### 拿聊天里那张图当参考（别人发图说「照这张画」）
+
+请求体多一个 `image` 字段就行，服务自己解：
+
+```bash
+curl -s -X POST http://127.0.0.1:7880/v1/images/generations \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"把这张改成水彩插画风，人物坐在窗边看书",
+       "size":"1024x1024",
+       "image":"data:image/jpeg;base64,…（宿主缩到长边 1024 再传）"}'
+```
+
+- `image` 收 `data:image/…;base64,…` 或裸 base64，默认上限 16 MB（`DRAW_IMAGE_MAX_BYTES`）；
+  进来先按 `DRAW_REF_MAX_SIDE`（768）缩一遍，视觉 token 才不会爆。
+- **垫一句指令再交给模型**（`DRAW_CHAT_TEMPLATE`）：这个管线的 `image` 是「条件图 latent 前置」，
+  没有 denoising 强度可调，提示词不明确时它会**几乎照抄**参考图 —— 实测只写「改成厚涂插画、雨天街角」
+  出来还是原图那张。所以默认前缀是「以参考图中的人物形象为准（长相、发型、服装一致），按要求重新画一张，
+  背景/姿势/画风都可以按描述变化」。加了之后同一条提示词就真的换成雨天街角 + 透明伞 + 厚涂质感了。
+  想让大肥鱼的形象强加上去，就把它设成和 `DRAW_CHAR_TEMPLATE` 一样；设空串 = 只用用户原话。
+- 输出面积照样压到 768²（图生图那条限制），比例跟参考图走 —— 竖图进、竖图出。
+- 实测：参考图 dfy-large.png（881 KB）+「改成水彩插画风、窗边看书」→ 640×928 / **62.7 秒** / 峰值 8.96 GB。
+- 网关这条路由的请求体上限是 24 MB（其它接口仍是 8 KB），超了回 **413 参考图太大**，不会报成「后端挂了」。
+
 ### 踩坑：一加参考图就报 `FP4 quantization state not initialized`
 
 纯文生图正常，一带 `image=` 就崩在 Qwen3-VL 的视觉 merger 上，最终是 bitsandbytes
@@ -247,6 +270,8 @@ curl.exe -X POST http://127.0.0.1:7880/v1/images/generations `
 | `DRAW_REF` | 空 | 固定用哪张参考图；留空按 `refs/default.txt`，再退到目录里第一张 |
 | `DRAW_REF_MAX_SIDE` | 768 | 参考图送进视觉塔前的最长边（调小省显存/更快） |
 | `DRAW_CHAR_TEMPLATE` | 内置那段 | 固定角色描述前缀，留空用内置 |
+| `DRAW_CHAT_TEMPLATE` | 内置那句指令 | 请求体带 `image`（别人发来的那张图）时垫在前面的指令，默认「以参考图里的人物形象为准…按要求重新画一张，背景/姿势/画风都可以变」。设空串 = 只按用户这句话改（实测那样容易几乎照抄原图） |
+| `DRAW_IMAGE_MAX_BYTES` | 16777216 | `image` 字段解码后的上限（16 MB），超了回 400 |
 | `DRAW_TE_ON_GPU` | 0 | 兜底开关：仍撞 FP4 报错时把文本编码器临时按到卡上（+约 5 GB 显存） |
 | `DRAW_VAE_TILING` | 1 | 1 = VAE 分块解码，把解码尖峰摊平（峰值 11.43 → 9.01 GB）。0 = 关掉（万一某张图出现拼缝） |
 | `DRAW_REQUEST_TIMEOUT` | 240 | 单张最多等多久（秒），超时回 504 并把管线标记待卸载；0 = 不限（实测一张 45~62 秒，留 4 倍余量） |

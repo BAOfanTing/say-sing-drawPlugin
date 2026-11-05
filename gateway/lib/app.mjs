@@ -20,6 +20,9 @@ export const VERSION = '1.0.5';
 const WEB_DIR = path.join(import.meta.dirname, '..', 'web');
 const NETEASE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const MAX_BODY_BYTES = 8 * 1024;
+// 出图请求要带参考图（宿主把聊天里那张图缩好、编成 data URI 塞在 body 里），8 KB 根本不够。
+// 单独给画图一条宽松线：24 MB ≈ 一张 17 MB 的原图，够用了；再大就说明链路哪里不对。
+const MAX_DRAW_BODY_BYTES = 24 * 1024 * 1024;
 const FILE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 const CONTENT_TYPES = {
@@ -94,12 +97,13 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
-async function readRawBody(req) {
+async function readRawBody(req, maxBytes = MAX_BODY_BYTES) {
   const chunks = [];
   let size = 0;
+  const human = maxBytes >= 1024 * 1024 ? `${Math.round(maxBytes / 1024 / 1024 * 10) / 10} MB` : `${Math.round(maxBytes / 1024)} KB`;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY_BYTES) throw Object.assign(new Error('请求体过大'), { code: 'E_TOO_BIG' });
+    if (size > maxBytes) throw Object.assign(new Error(`请求体过大（上限 ${human}）`), { code: 'E_TOO_BIG' });
     chunks.push(chunk);
   }
   return Buffer.concat(chunks).toString('utf8') || '{}';
@@ -686,7 +690,8 @@ export function createApp({
       // 不能变成未捕获拒绝（那会让整个网关退出，连唱歌/说话一起哑掉）。
       // 拉起/占槽/重试的细节在 lib/draw-proxy.mjs，这里只管收发。
       try {
-        const raw = await readRawBody(req);
+        // 画图请求可能带参考图（data URI），用宽松的那条上限
+        const raw = await readRawBody(req, MAX_DRAW_BODY_BYTES);
         const out = await drawProxy.forward(raw);
         res.writeHead(out.status, {
           'content-type': out.contentType || 'application/json; charset=utf-8',
@@ -695,6 +700,14 @@ export function createApp({
         res.end(out.body);
         return;
       } catch (error) {
+        // 请求体太大是**调用方**的问题（参考图没缩），别报成后端挂了
+        if (error?.code === 'E_TOO_BIG') {
+          const message = `参考图太大：${String(error?.message ?? error).slice(0, 120)}（宿主那把图缩小一点，或者调小参考图长边）`;
+          console.error(`[draw] ✗ ${message}`);
+          if (!res.headersSent && !res.writableEnded) sendJson(res, 413, { error: { message } });
+          else res.destroy();
+          return;
+        }
         const message = `画图后端不可用：${String(error?.message ?? error).slice(0, 200)}`;
         console.error(`[draw] ✗ ${message}`);
         if (res.headersSent || res.writableEnded) {

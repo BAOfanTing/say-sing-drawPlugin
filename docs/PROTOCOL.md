@@ -156,15 +156,25 @@ Content-Type: application/json
 POST /v1/images/generations
 { "model": "qwen-image-2.1-turbo", "prompt": "…", "n": 1, "size": "1024x1024" }
 
+// 请求（图生图：拿一张现成的图当参考，宿主「照着聊天里那张画」时用）
+{ "prompt": "把这张改成水彩插画风", "size": "1024x1024",
+  "image": "data:image/jpeg;base64,/9j/4AAQSkZJRg…" }
+
 // 响应
 { "created": 1793630507, "data": [ { "b64_json": "iVBORw0KGgo…" } ] }
 ```
+
+`image` 是**可选**的条件图（data URI 或裸 base64，服务端上限 16 MB）。带了就走图生图：保持参考图里
+的人物形象、按 `prompt` 重画（服务会垫一句 `DRAW_CHAT_TEMPLATE` 指令 —— 这个管线没有 denoising
+强度可调，不垫的话提示词一模糊它就几乎照抄原图），输出面积默认压到 768²
+（10 GB 卡上 1024² 的图生图出不来）。不带 `image` 时行为完全不变。
 
 网关做的事：
 
 1. 先把本地 TTS 让出显存（它占 8 GB，和画图不可能共存）；
 2. 唱歌任务在跑就排队等它结束（串行队列最多 1 个）；
 3. 转发到 `draw.url`（默认 `http://127.0.0.1:7880`），带 `draw.token`（如果配了）；
+   画图这条路由的请求体上限是 **24 MB**（要装得下参考图），其它接口仍是 8 KB；超了回 413 并说明原因；
 4. 出图服务没在跑（闲置退出是常态）时，按 `draw.startCommand` 把它拉起来再转发；
 5. 原样返回上游的状态码与响应体。
 
