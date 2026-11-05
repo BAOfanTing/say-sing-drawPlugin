@@ -748,6 +748,50 @@ export function createApp({
       return;
     }
 
+    // ── OpenAI 风格的模型清单（给 aurabot 这类宿主用）──────────────────
+    // 宿主的「语音」页要填一个 model 名字，面板也想知道有哪些音色可用；
+    // 这里把网关实际能提供的报出去，省得用户去猜 / 抄文档。只读，不碰 GPU。
+    if (pathname === '/v1/models' && req.method === 'GET') {
+      // 这个口在统一鉴权之前（和 /health 挨着），所以自己先查一次令牌，别成了免鉴权后门
+      if (!tokenOk(req)) {
+        sendJson(res, 401, { ok: false, message: '令牌不对：请求头要带 Authorization: Bearer <token>' });
+        return;
+      }
+      const models = [];
+      if (say.name !== 'none') {
+        models.push({
+          id: String(config.say?.model || config.say?.breezeModel || 'breeze-tts-2'),
+          object: 'model',
+          owned_by: 'say-sing-draw',
+          kind: 'tts'
+        });
+      }
+      if (voice.name !== 'none') {
+        models.push({
+          id: `sing:${config.voice?.defaultVoice || voice.name}`,
+          object: 'model',
+          owned_by: 'say-sing-draw',
+          kind: 'sing'
+        });
+      }
+      const draw = drawProxy.status();
+      if (draw && (draw.url || draw.configured)) models.push({ id: 'draw', object: 'model', owned_by: 'say-sing-draw', kind: 'draw' });
+      let voices = [];
+      try {
+        voices = say.name !== 'none' && typeof say.listVoices === 'function' ? await say.listVoices() : [];
+      } catch {
+        voices = [];
+      }
+      sendJson(res, 200, {
+        object: 'list',
+        data: models,
+        // 非标准扩展：音色清单（OpenAI 没有这个概念，宿主面板可以拿来当下拉框）
+        voices: (Array.isArray(voices) ? voices : []).map((v) => (typeof v === 'string' ? { id: v, name: v } : v)),
+        singVoices: voice.name !== 'none' ? voice.voices : []
+      });
+      return;
+    }
+
     // ── 网易云扫码登录（拿 Cookie，只存本机）──────────────────────────
     // 页面是静态的，不需要鉴权；它调的 /login/* 只认请求头（x-gateway-token / Bearer），
     // 页面自己把令牌放在 # 片段里读，不发给服务器。
