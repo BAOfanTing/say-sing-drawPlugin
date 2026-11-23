@@ -54,7 +54,7 @@
     <button id="refresh" hidden>换一张</button>
     <p class="foot">
       扫码后如果提示"确认登录"，请在手机上点确认。<br>
-      登录态会写进网关的 <code>config.json</code>（<code>source.neteaseCookie</code>），不需要手动复制。
+      登录态会自动保存在网关的运行时配置（<code>gateway-run/runtime.json</code>），并在重启后自动恢复，不需要手动复制。
     </p>
   </main>
   <script src="/login/qrcode.js"></script>

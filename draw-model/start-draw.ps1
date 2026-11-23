@@ -1,10 +1,10 @@
-﻿# 启动本地出图服务（Qwen-Image-2.1-Turbo，纯 diffusers）
+# 启动本地出图服务（Qwen-Image-2.1-Turbo，纯 diffusers）
 #
 # 用法：
-#   powershell -ExecutionPolicy Bypass -File draw\start-draw.ps1
+#   powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1
 #   powershell -ExecutionPolicy Bypass -File draw-model\start-draw.ps1 -IdleSeconds 0  # 常驻不退
 #
-# 需要先有 draw-model\weights\ 下的权重（见 draw\README.md 的下载清单）。
+# 需要先有 draw-model\weights\ 下的权重（见 draw-model\README.md 的下载清单）。
 
 param(
   [int]$Port = 7880,
@@ -16,17 +16,41 @@ param(
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path   # 就是 draw-model\
 
-# venv 优先（里面有 diffusers / transformers / bitsandbytes），退回 sing 环境
+# venv 优先（里面有 diffusers / transformers / bitsandbytes），退回 sing/say-sing 环境
 if (-not $Python) {
   $venvPy = Join-Path $here '.venv\Scripts\python.exe'
-  if (Test-Path $venvPy) { $Python = $venvPy }
-  else { $Python = 'E:\APP\Anaconda\envs\sing\python.exe' }
+  if (Test-Path $venvPy) {
+    $Python = $venvPy
+  } else {
+    $cands = @(
+      'E:\APP\Anaconda\envs\sing\python.exe',
+      'C:\ProgramData\Anaconda3\envs\say-sing\python.exe'
+    )
+    foreach ($envName in @('sing', 'say-sing', 'breeze')) {
+      $base = (Get-Command conda -ErrorAction SilentlyContinue | Select-Object -First 1)
+      if ($base) {
+        $basePath = if ($base.Path) { $base.Path } elseif ($base.Source) { $base.Source } else { $base.Definition }
+        if ($basePath -and (Test-Path $basePath)) {
+          $p1 = Split-Path -Parent $basePath
+          if ($p1) {
+            $condaRoot = Split-Path -Parent $p1
+            if ($condaRoot) { $cands += (Join-Path $condaRoot "envs\$envName\python.exe") }
+          }
+        }
+      }
+    }
+    $Python = ($cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1)
+    if (-not $Python) {
+      $pyCmd = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1)
+      if ($pyCmd) { $Python = if ($pyCmd.Path) { $pyCmd.Path } else { $pyCmd.Source } }
+    }
+  }
 }
 
 $weights = Join-Path $here 'weights'
 if (-not (Test-Path $weights)) {
   Write-Host "✗ 权重目录不存在：$weights" -ForegroundColor Red
-  Write-Host "  先按 draw\README.md 的清单下载" -ForegroundColor Yellow
+  Write-Host "  先按 draw-model\README.md 的清单下载" -ForegroundColor Yellow
   exit 1
 }
 

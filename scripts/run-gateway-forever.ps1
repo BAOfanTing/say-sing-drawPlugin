@@ -1,4 +1,4 @@
-﻿<#
+<#
   网关守护：崩溃/退出后自动重启（Windows 没 systemd，用这个小循环顶上）。
 
   用法：
@@ -12,10 +12,9 @@ $here = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $node = (Get-Command node -ErrorAction SilentlyContinue).Source
 if (-not $node) { throw '找不到 node，请把 Node.js 加到 PATH' }
 
-# Node 连 api.breeze.blue 时默认有 Happy Eyeballs + IPv6 优先的问题，会偶发 "fetch failed"；
-# 强制 IPv4 优先并把地址族探测放宽（宿主机上同样处理过，2026-10-30 踩过）。
+# 放宽地址族探测超时（避免 Happy Eyeballs 慢连导致偶发 fetch failed）
 if (-not $env:NODE_OPTIONS) {
-    $env:NODE_OPTIONS = '--dns-result-order=ipv4first --network-family-autoselection-attempt-timeout=5000'
+    $env:NODE_OPTIONS = '--network-family-autoselection-attempt-timeout=5000'
 }
 
 # 让 RVC 子进程能找到 ffmpeg（sing-model/bin 里那份）与 conda 的 Scripts
