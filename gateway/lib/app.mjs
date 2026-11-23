@@ -16,7 +16,7 @@ import { createLocalSay } from './local-say.mjs';
 import { createSaySpeech } from './say-speech.mjs';
 import { createDrawProxy } from './draw-proxy.mjs';
 
-export const VERSION = '1.0.5';
+export const VERSION = '1.0.6';
 const WEB_DIR = path.join(import.meta.dirname, '..', 'web');
 const NETEASE_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 const MAX_BODY_BYTES = 8 * 1024;
@@ -249,7 +249,7 @@ export function createApp({
     const outPath = path.join(filesDir, `out-${job.jobId}.${usedTarget}`);
     const probedSec = Math.round(await probeSeconds(outPath)) || 0;
     // 探不到时长时用请求时长兜底：报 0 会让宿主退回"按字数估"，又说成 1 秒
-    const seconds = probedSec > 0 ? Math.min(maxSeconds, probedSec) : maxSeconds;
+    const seconds = probedSec > 0 ? (maxSeconds > 0 ? Math.min(maxSeconds, probedSec) : probedSec) : maxSeconds;
     const bytes = fs.statSync(outPath).size;
 
     // 中间文件用完就删；成品留在 files/ 给插件下载（TTL 清理见 pruneFiles）

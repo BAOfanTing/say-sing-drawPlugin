@@ -1,4 +1,4 @@
-﻿# 看门狗：每 5 分钟检查三个后端，挂了就重启对应计划任务。
+# 看门狗：每 5 分钟检查三个后端，挂了就重启对应计划任务。
 #
 # 为什么需要：宿主机看到的 502 通常是"隧道活着但本地 8899 挂了"，或"隧道断了但任务没重连"。
 # 这个脚本把两种情况都兜住，并把结果写进 logs/watchdog.log。
@@ -8,7 +8,8 @@
 #     /TR "powershell.exe -ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File <仓库路径>\scripts\watchdog.ps1"
 
 param(
-  [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
+  [string]$RepoRoot = (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)),
+  [string]$Server = ''
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -37,7 +38,7 @@ if (-not (Test-Url 'http://127.0.0.1:8899/health')) {
 
 # ── 2) 反向隧道（ssh 进程）──────────────────────────────
 $ssh = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" |
-  Where-Object { $_.CommandLine -match '124\.71\.186\.144|-R 127\.0\.0\.1:8898' }
+  Where-Object { $_.CommandLine -match '-R\s+127\.0\.0\.1:8898|-R\s+127\.0\.0\.1:8899|QQAgentSingTunnel' -or ($Server -and $_.CommandLine -match [regex]::Escape($Server)) }
 if (-not $ssh) {
   Write-Log '隧道 ssh 进程不存在 → 重启 QQAgentSingTunnel'
   schtasks.exe /Run /TN 'QQAgentSingTunnel' | Out-Null

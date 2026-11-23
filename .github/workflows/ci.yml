@@ -5,11 +5,11 @@ name: ci
 #
 # 三个分支各跑各的（见 docs/DEVELOPMENT.md「分支约定」）：
 #   core           = 宿主无关基线，没有 plugin/sing → 只跑单元测试
-#   main           = core + qq-agent-plus 插件层 → 清单校验 + 单元测试
+#   qq-agent       = core + qq-agent-plus 插件层 → 清单校验 + 单元测试
 #   dsh-aurabot-qq = core + aurabot 适配层，没有 plugin/sing → 只跑单元测试
 on:
   push:
-    branches: [main, core, dsh-aurabot-qq]
+    branches: [qq-agent, core, dsh-aurabot-qq, main]
   pull_request:
   workflow_dispatch:
 
