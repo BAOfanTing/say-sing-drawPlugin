@@ -57,13 +57,32 @@ if (-not (Test-Path $weights)) {
 # 缺 TURBO 的主体权重就直接说清楚，别等第一张图才报错
 $need = @(
   'turbo-dit\transformer\diffusion_pytorch_model-00001-of-00002.safetensors',
+  'turbo-dit\transformer\diffusion_pytorch_model-00002-of-00002.safetensors',
   'turbo-vae\vae\diffusion_pytorch_model.safetensors',
-  'text_encoders\model-00001-of-00002.safetensors'
+  'text_encoders\model-00001-of-00002.safetensors',
+  'text_encoders\model-00002-of-00002.safetensors'
 )
-$missing = $need | Where-Object { -not (Test-Path (Join-Path $weights $_)) }
+$missing = @()
+$corrupted = @()
+foreach ($item in $need) {
+  $target = Join-Path $weights $item
+  if (-not (Test-Path $target)) {
+    $missing += $item
+  } elseif ((Get-Item $target).Length -lt 1048576) {
+    $corrupted += $item
+  }
+}
 if ($missing) {
-  Write-Host "⚠ 还缺这些权重（服务仍会启动，但第一次出图会失败）：" -ForegroundColor Yellow
+  Write-Host "⚠ 还缺这些权重（第一次出图会失败）：" -ForegroundColor Yellow
   $missing | ForEach-Object { Write-Host "    $_" }
+}
+if ($corrupted) {
+  Write-Host "✗ 以下权重文件大小异常（0 字节或下载未完成，会导致加载报错 502）：" -ForegroundColor Red
+  $corrupted | ForEach-Object {
+    $sz = [math]::Round((Get-Item (Join-Path $weights $_)).Length / 1MB, 2)
+    Write-Host "    $_  ($sz MB)" -ForegroundColor Red
+  }
+  Write-Host "  请删除上述异常文件并按 draw-model\README.md 重新下载完整权重" -ForegroundColor Yellow
 }
 
 $env:DRAW_PORT = "$Port"
