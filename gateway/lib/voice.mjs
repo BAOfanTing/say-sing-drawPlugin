@@ -24,6 +24,19 @@ function fillCommand(template, values) {
     .replace(/\{(input|output|pitch|voice)\}/g, (_, key) => quote(values[key] ?? ''));
 }
 
+function killProcessTree(child) {
+  if (!child) return;
+  // Windows 下 spawn(..., { shell: true }) 启动的是 cmd.exe，直接 kill 只杀 cmd.exe 会残留 Python 孙进程（显存泄漏）
+  if (process.platform === 'win32' && child.pid) {
+    try {
+      spawn('taskkill', ['/T', '/F', '/PID', String(child.pid)], { windowsHide: true });
+    } catch { /* 忽略 */ }
+  }
+  try {
+    child.kill('SIGKILL');
+  } catch { /* 忽略 */ }
+}
+
 export function createVoiceEngine(config) {
   const engine = config.voice.engine;
 
@@ -70,7 +83,7 @@ export function createVoiceEngine(config) {
       if (!proc) return;
       const child = proc;
       proc = null;
-      try { child.kill(); } catch { /* 忽略 */ }
+      killProcessTree(child);
       for (const [, entry] of pending) entry.reject(Object.assign(new Error(`常驻换声进程退出（${reason}）`), { code: 'E_SERVE_EXIT' }));
       pending.clear();
       console.log(`[voice] 常驻换声进程已关闭：${reason}`);
@@ -191,7 +204,7 @@ export function createVoiceEngine(config) {
         });
         let stderr = '';
         const timer = setTimeout(() => {
-          child.kill('SIGKILL');
+          killProcessTree(child);
           reject(Object.assign(new Error(`换声命令超时（${Math.round(timeoutMs / 1000)} 秒）`), { code: 'E_TIMEOUT' }));
         }, timeoutMs);
         child.stderr?.on('data', (chunk) => {

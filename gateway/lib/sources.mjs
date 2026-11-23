@@ -64,6 +64,9 @@ export function createNeteaseSource({ limit = 5, cookie = '', fetchFn = fetch } 
     const response = await fetchFn(url, { headers: baseHeaders });
     if (!response.ok) throw new Error(`网易云搜索失败：HTTP ${response.status}`);
     const data = await response.json();
+    if (data?.abroad || typeof data?.result === 'string') {
+      console.warn('[source/netease] ⚠ 网易云返回海外加密结果（命中海外 IP 限制或开启了全局代理），无法解析歌曲列表');
+    }
     const songs = Array.isArray(data?.result?.songs) ? data.result.songs : [];
     return rankByScore(
       songs.map((song) => ({
@@ -145,8 +148,10 @@ export function createLocalSource({ dir, limit = 5 } = {}) {
 
   const prepare = async (item, { tmpDir }) => {
     const name = assertSafeRelPath(item?.id ?? item?.title);
-    const source = path.join(dir, name);
-    if (!source.startsWith(path.resolve(dir))) throw new Error('local 音源路径越界');
+    const baseDir = path.resolve(dir);
+    const source = path.resolve(baseDir, name);
+    const rel = path.relative(baseDir, source);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) throw new Error('local 音源路径越界');
     if (!fs.existsSync(source)) throw new Error(`本地音频不见了：${name}`);
     fs.mkdirSync(tmpDir, { recursive: true });
     const file = path.join(tmpDir, `src-${Date.now()}${path.extname(name).toLowerCase()}`);

@@ -1,4 +1,4 @@
-﻿# 本地启动 Breeze TTS 2（Windows 原生，eager 模式）
+# 本地启动 Breeze TTS 2（Windows 原生，eager 模式）
 #
 # 为什么是 eager：--fast-* 要走 Inductor 编译 CUDA graph，需要 MSVC Build Tools + CUDA 12 toolkit；
 # 本机只有 CUDA 11.2 且没装 MSVC，所以先用 eager（显存约 7.7 GB，速度慢些但能跑）。
@@ -11,7 +11,7 @@ param(
     [int]$Port = 7860,
     [string]$HostAddr = '127.0.0.1',
     [switch]$Fast,
-    [string]$Python = 'E:\APP\Anaconda\envs\sing\python.exe',
+    [string]$Python = '',
     [string]$ModelDir = ''
 )
 
@@ -20,6 +20,41 @@ $repo = $PSScriptRoot
 if (-not $ModelDir) { $ModelDir = Join-Path $repo 'weights\breeze-tts-2' }
 $logDir = Join-Path $repo 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+
+if (-not $Python) {
+    $cfgPath = Join-Path (Split-Path -Parent $repo) 'gateway\config.json'
+    if (Test-Path $cfgPath) {
+        try {
+            $cfg = Get-Content $cfgPath -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($cfg.say.localPython -and (Test-Path $cfg.say.localPython)) { $Python = $cfg.say.localPython }
+        } catch {}
+    }
+}
+if (-not $Python) {
+    $cands = @(
+        (Join-Path $repo '.venv\Scripts\python.exe'),
+        'E:\APP\Anaconda\envs\sing\python.exe',
+        'C:\ProgramData\Anaconda3\envs\say-sing\python.exe'
+    )
+    foreach ($envName in @('say-sing', 'sing', 'breeze')) {
+        $base = (Get-Command conda -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($base) {
+            $basePath = if ($base.Path) { $base.Path } elseif ($base.Source) { $base.Source } else { $base.Definition }
+            if ($basePath -and (Test-Path $basePath)) {
+                $p1 = Split-Path -Parent $basePath
+                if ($p1) {
+                    $condaRoot = Split-Path -Parent $p1
+                    if ($condaRoot) { $cands += (Join-Path $condaRoot "envs\$envName\python.exe") }
+                }
+            }
+        }
+    }
+    $Python = ($cands | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1)
+}
+if (-not $Python) {
+    $pyCmd = (Get-Command python.exe -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($pyCmd) { $Python = if ($pyCmd.Path) { $pyCmd.Path } else { $pyCmd.Source } }
+}
 
 if (-not (Test-Path (Join-Path $ModelDir 'config.json'))) {
     Write-Host "✗ 权重目录不对：$ModelDir" -ForegroundColor Red

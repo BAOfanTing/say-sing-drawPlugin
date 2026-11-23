@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { normalizeConfig } from '../gateway/lib/config.mjs';
-import { createApp } from '../gateway/lib/app.mjs';
+import { createApp, VERSION } from '../gateway/lib/app.mjs';
+import { createLocalSource } from '../gateway/lib/sources.mjs';
 
 const TOKEN = 'test-token-123';
 const tick = (ms = 10) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -476,5 +477,37 @@ test('/say/status：Breeze 持续 500 时，连续两次都要报离线（缓存
   } finally {
     await close();
     await new Promise((resolve) => fake.close(resolve));
+  }
+});
+
+test('VERSION：保持为 1.0.6 与 package.json 同步', () => {
+  const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.equal(VERSION, pkg.version);
+});
+
+test('createLocalSource：相对路径下 prepare 能正常解析且防范越界', async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'localsrc-'));
+  try {
+    const songFile = path.join(tmp, 'test_song.wav');
+    fs.writeFileSync(songFile, Buffer.alloc(100));
+
+    // 使用相对路径实例化
+    const relDir = path.relative(process.cwd(), tmp);
+    const src = createLocalSource({ dir: relDir, limit: 5 });
+    const list = await src.search('test_song');
+    assert.equal(list.length, 1);
+    assert.equal(list[0].id, 'test_song.wav');
+
+    const outDir = path.join(tmp, 'out');
+    const prepared = await src.prepare(list[0], { tmpDir: outDir });
+    assert.ok(fs.existsSync(prepared.file));
+
+    // 验证防越界与路径校验
+    await assert.rejects(
+      async () => src.prepare({ id: '../evil.wav' }, { tmpDir: outDir }),
+      /路径分隔符|越界/
+    );
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
 });

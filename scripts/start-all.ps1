@@ -1,4 +1,4 @@
-﻿# 一键跑起来：检查环境 → 体检权重 → 生成配置 → 起网关 →（有画图权重就）起出图服务 → 起隧道 → 打印地址
+# 一键跑起来：检查环境 → 体检权重 → 生成配置 → 起网关 →（有画图权重就）起出图服务 → 起隧道 → 打印地址
 #
 # 用法：
 #   powershell -ExecutionPolicy Bypass -File scripts\start-all.ps1              # 说话+唱歌（有画图权重就自动带上）
@@ -35,6 +35,17 @@ if (-not $node) { throw '找不到 node.exe，请先装 Node.js 18+ 并加到 PA
 Write-Host ("✓ node " + (& $node -v)) -ForegroundColor Green
 
 if (-not $Python) {
+    if (Test-Path (Join-Path $repo 'gateway\config.json')) {
+        try {
+            $existingCfg = Get-Content (Join-Path $repo 'gateway\config.json') -Raw -Encoding utf8 | ConvertFrom-Json
+            if ($existingCfg.say.localPython -and (Test-Path $existingCfg.say.localPython)) {
+                $Python = $existingCfg.say.localPython
+            }
+        } catch {}
+    }
+}
+
+if (-not $Python) {
     # 常见位置 + conda 环境逐个试
     $cands = @(
         (Join-Path $env:USERPROFILE 'miniconda3\envs\say-sing\python.exe'),
@@ -42,10 +53,18 @@ if (-not $Python) {
         'C:\ProgramData\Anaconda3\envs\say-sing\python.exe'
     )
     foreach ($envName in @('say-sing', 'sing', 'breeze')) {
-        $base = (Get-Command conda -ErrorAction SilentlyContinue)
+        $base = (Get-Command conda -ErrorAction SilentlyContinue | Select-Object -First 1)
         if ($base) {
-            $condaRoot = Split-Path -Parent (Split-Path -Parent $base.Source)
-            $cands += (Join-Path $condaRoot "envs\$envName\python.exe")
+            $basePath = if ($base.Path) { $base.Path } elseif ($base.Source) { $base.Source } else { $base.Definition }
+            if ($basePath -and (Test-Path $basePath)) {
+                $p1 = Split-Path -Parent $basePath
+                if ($p1) {
+                    $condaRoot = Split-Path -Parent $p1
+                    if ($condaRoot) {
+                        $cands += (Join-Path $condaRoot "envs\$envName\python.exe")
+                    }
+                }
+            }
         }
     }
     $Python = ($cands | Where-Object { Test-Path $_ } | Select-Object -First 1)
@@ -119,10 +138,25 @@ if ($health -and $health.ok) {
     if (-not $health.ok) { throw '网关没起来，看 gateway\gateway-run\gateway.log' }
     Write-Host "✓ 网关已常驻（计划任务 $taskName，v$($health.version)）" -ForegroundColor Green
 } else {
-    Write-Host '▶ 前台启动网关（Ctrl+C 停止；要常驻加 -Detach）' -ForegroundColor Cyan
+    Write-Host '▶ 后台启动网关（若要开机常驻计划任务请加 -Detach）' -ForegroundColor Cyan
+    $gwLogDir = Join-Path $repo 'gateway\gateway-run'
+    New-Item -ItemType Directory -Force -Path $gwLogDir | Out-Null
+    $gwOutLog = Join-Path $gwLogDir 'gateway.log'
+    $gwErrLog = Join-Path $gwLogDir 'gateway.err.log'
     $env:PATH = "$(Join-Path $repo 'sing-model\bin');$env:PATH"
-    & $node (Join-Path $repo 'gateway\server.mjs')
-    return
+    $gwProc = Start-Process -FilePath $node -ArgumentList (Join-Path $repo 'gateway\server.mjs') `
+        -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput $gwOutLog -RedirectStandardError $gwErrLog
+    for ($i = 0; $i -lt 30; $i++) {
+        Start-Sleep -Seconds 2
+        try { $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2 } catch { }
+        if ($health -and $health.ok) { break }
+        if ($gwProc.HasExited) { break }
+    }
+    if (-not ($health -and $health.ok)) {
+        throw "网关没起来（进程退出码 $($gwProc.ExitCode)），看 gateway\gateway-run\gateway.log"
+    }
+    Write-Host "✓ 网关已启动（PID $($gwProc.Id)，v$($health.version)）" -ForegroundColor Green
 }
 
 # ── 5. Cloudflare 隧道 ────────────────────────────────────
@@ -155,7 +189,7 @@ if ($NoTunnel) {
             Where-Object { $_.CommandLine -like "*$Port*" } |
             ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
         # Start-Process 会脱离当前会话的作业对象
-        Start-Process -FilePath $Cloudflared -ArgumentList 'tunnel', '--url', "http://127.0.0.1:$Port", '--no-autoupdate' `
+        Start-Process -FilePath $Cloudflared -ArgumentList 'tunnel', '--url', "http://127.0.0.1:$Port", '--no-autoupdate', '--protocol', 'http2' `
             -WindowStyle Hidden -RedirectStandardError $cfLog -RedirectStandardOutput (Join-Path $logDir 'cloudflared.out.log') | Out-Null
         $url = ''
         for ($i = 0; $i -lt 40; $i++) {
